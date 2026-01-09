@@ -39,38 +39,25 @@ export default function Dashboard() {
         setFolders(myFolders || [])
         setFiles(myFiles || [])
 
-        const { data: sharedFileLinks } = await supabase
-          .from('file_shares')
-          .select('file_id')
-          .eq('shared_with_user_id', user.userId);
-
+        const { data: sharedFileLinks } = await supabase.from('file_shares').select('file_id').eq('shared_with_user_id', user.userId)
+        
         if (sharedFileLinks && sharedFileLinks.length > 0) {
-          const { data: sharedFilesData } = await supabase
-            .from('files')
-            .select('*')
-            .in('file_id', sharedFileLinks.map(f => f.file_id));
-          setSharedFiles(sharedFilesData || []);
+          const { data: sharedFilesData } = await supabase.from('files').select('*').in('file_id', sharedFileLinks.map(f => f.file_id))
+          setSharedFiles(sharedFilesData || [])
         } else {
-          setSharedFiles([]);
+          setSharedFiles([])
         }
 
-        // Tương tự với folders
-        const { data: sharedFolderLinks } = await supabase
-          .from('folder_shares')
-          .select('folder_id')
-          .eq('shared_with_user_id', user.userId);
-
+        const { data: sharedFolderLinks } = await supabase.from('folder_shares').select('folder_id').eq('shared_with_user_id', user.userId)
+        
         if (sharedFolderLinks && sharedFolderLinks.length > 0) {
-          const { data: sharedFoldersData } = await supabase
-            .from('folders')
-            .select('*')
-            .in('folder_id', sharedFolderLinks.map(f => f.folder_id));
-          setSharedFolders(sharedFoldersData || []);
+          const { data: sharedFoldersData } = await supabase.from('folders').select('*').in('folder_id', sharedFolderLinks.map(f => f.folder_id))
+          setSharedFolders(sharedFoldersData || [])
         } else {
-          setSharedFolders([]);
+          setSharedFolders([])
         }
 
-        console.log('[DEBUG] Data loaded:', { myFolders, myFiles, sharedFilesData, sharedFoldersData })
+        console.log('[DEBUG] Data loaded:', { myFolders, myFiles, sharedFilesData: sharedFiles, sharedFoldersData: sharedFolders })
       } catch (err) {
         console.error('[ERROR] loadData:', err)
       }
@@ -97,61 +84,83 @@ export default function Dashboard() {
 
   const handleDoubleClick = async (item) => {
     if (item.folder_id) setCurrentFolderId(item.folder_id)
-    else await handleOpen(item)
+    else await handlePreview(item)
   }
 
-  const handleOpen = async (file) => {
+  // ✅ HÀM MỚI: Preview file (mở xem trước)
+  const handlePreview = async (file) => {
     try {
-      const { data, error } = await supabase.storage.from('encrypted-files').download(file.storage_path)
-      if (error) throw error
-
-      const buffer = await data.arrayBuffer()
-      const encryptedBytes = new Uint8Array(buffer)
-
-      let decryptedFileKeyBase64
-
-      // ✅ Kiểm tra file của mình hay file shared
-      if (file.owner_id === user.userId) {
-        console.log('[DEBUG] Opening own file:', file.original_filename)
-        // ✅ THÊM userPublicKeyBase64
-        decryptedFileKeyBase64 = await decryptFileKeyForUser({
-          sealedBase64Url: file.encrypted_file_key_owner,
-          userPublicKeyBase64: user.publicKey,  // ✅ THÊM DÒNG NÀY
-          userPrivateKeyBase64: user.privateKey
-        })
-      } else {
-        console.log('[DEBUG] Opening shared file:', file.original_filename)
-        // File được share
-        const { data: shareData, error: shareError } = await supabase
-          .from('file_shares')
-          .select('encrypted_file_key')
-          .eq('file_id', file.file_id)
-          .eq('shared_with_user_id', user.userId)
-          .single()
-
-        if (shareError || !shareData) {
-          throw new Error('Cannot access shared file key')
-        }
-
-        // ✅ THÊM userPublicKeyBase64
-        decryptedFileKeyBase64 = await decryptFileKeyForUser({
-          sealedBase64Url: shareData.encrypted_file_key,
-          userPublicKeyBase64: user.publicKey,  // ✅ THÊM DÒNG NÀY
-          userPrivateKeyBase64: user.privateKey
-        })
-      }
-
-      console.log('[DEBUG] FileKey decrypted:', decryptedFileKeyBase64)
-
-      const decrypted = await decryptFile(encryptedBytes, decryptedFileKeyBase64, file.iv)
-
-      const blob = new Blob([decrypted], { type: file.mime_type })
-      const url = URL.createObjectURL(blob)
+      const decryptedBlob = await decryptFileHelper(file)
+      const url = URL.createObjectURL(decryptedBlob)
       setPreviewFile({ url, name: file.original_filename, type: file.mime_type })
     } catch (err) {
-      console.error('[ERROR] handleOpen:', err)
-      alert('Open file failed: ' + err.message)
+      console.error('[ERROR] handlePreview:', err)
+      alert('Preview failed: ' + err.message)
     }
+  }
+
+  // ✅ HÀM MỚI: Download file (tải về thực sự)
+  const handleDownload = async (file) => {
+    try {
+      const decryptedBlob = await decryptFileHelper(file)
+      
+      // Tạo link download
+      const url = URL.createObjectURL(decryptedBlob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = file.original_filename
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      URL.revokeObjectURL(url)
+      
+      console.log('[INFO] File downloaded:', file.original_filename)
+    } catch (err) {
+      console.error('[ERROR] handleDownload:', err)
+      alert('Download failed: ' + err.message)
+    }
+  }
+
+  // ✅ HELPER: Decrypt file (dùng chung cho preview và download)
+  const decryptFileHelper = async (file) => {
+    const { data, error } = await supabase.storage.from('encrypted-files').download(file.storage_path)
+    if (error) throw error
+
+    const buffer = await data.arrayBuffer()
+    const encryptedBytes = new Uint8Array(buffer)
+
+    let decryptedFileKeyBase64
+
+    if (file.owner_id === user.userId) {
+      console.log('[DEBUG] Decrypting own file:', file.original_filename)
+      decryptedFileKeyBase64 = await decryptFileKeyForUser({
+        sealedBase64Url: file.encrypted_file_key_owner,
+        userPublicKeyBase64: user.publicKey,
+        userPrivateKeyBase64: user.privateKey
+      })
+    } else {
+      console.log('[DEBUG] Decrypting shared file:', file.original_filename)
+      const { data: shareData, error: shareError } = await supabase
+        .from('file_shares')
+        .select('encrypted_file_key')
+        .eq('file_id', file.file_id)
+        .eq('shared_with_user_id', user.userId)
+        .single()
+
+      if (shareError || !shareData) {
+        throw new Error('Cannot access shared file key')
+      }
+
+      decryptedFileKeyBase64 = await decryptFileKeyForUser({
+        sealedBase64Url: shareData.encrypted_file_key,
+        userPublicKeyBase64: user.publicKey,
+        userPrivateKeyBase64: user.privateKey
+      })
+    }
+
+    console.log('[DEBUG] FileKey decrypted')
+    const decrypted = await decryptFile(encryptedBytes, decryptedFileKeyBase64, file.iv)
+    return new Blob([decrypted], { type: file.mime_type })
   }
 
   const handleUploadFile = async (event, folderId = currentFolderId) => {
@@ -189,38 +198,36 @@ export default function Dashboard() {
   }
 
   const handleUploadFolder = async (event) => {
-    const files = Array.from(event.target.files);
-    if (files.length === 0) return;
+    const files = Array.from(event.target.files)
+    if (files.length === 0) return
 
     try {
-      const folderStructure = {};
+      const folderStructure = {}
       
-      // Phân tích cấu trúc folder từ webkitRelativePath
       for (let file of files) {
-        const pathParts = file.webkitRelativePath.split('/');
-        pathParts.pop(); // Bỏ tên file
+        const pathParts = file.webkitRelativePath.split('/')
+        pathParts.pop()
         
-        let currentPath = '';
+        let currentPath = ''
         for (let part of pathParts) {
-          const parentPath = currentPath;
-          currentPath = currentPath ? `${currentPath}/${part}` : part;
+          const parentPath = currentPath
+          currentPath = currentPath ? `${currentPath}/${part}` : part
           
           if (!folderStructure[currentPath]) {
-            folderStructure[currentPath] = { parentPath, name: part, folderId: null };
+            folderStructure[currentPath] = { parentPath, name: part, folderId: null }
           }
         }
       }
 
-      // Tạo folders theo thứ tự depth
       const sortedPaths = Object.keys(folderStructure).sort((a, b) => 
         a.split('/').length - b.split('/').length
-      );
+      )
 
       for (let path of sortedPaths) {
-        const folder = folderStructure[path];
+        const folder = folderStructure[path]
         const parentFolderId = folder.parentPath 
           ? folderStructure[folder.parentPath].folderId 
-          : currentFolderId;
+          : currentFolderId
 
         const { data: newFolder, error } = await supabase
           .from('folders')
@@ -230,31 +237,28 @@ export default function Dashboard() {
             owner_id: user.userId 
           }])
           .select()
-          .single();
+          .single()
 
-        if (error) throw error;
-        folder.folderId = newFolder.folder_id;
-        setFolders(prev => [...prev, newFolder]);
+        if (error) throw error
+        folder.folderId = newFolder.folder_id
+        setFolders(prev => [...prev, newFolder])
       }
 
-      // Upload files
       for (let file of files) {
-        const pathParts = file.webkitRelativePath.split('/');
-        pathParts.pop();
-        const folderPath = pathParts.join('/');
-        const targetFolderId = folderPath ? folderStructure[folderPath].folderId : currentFolderId;
+        const pathParts = file.webkitRelativePath.split('/')
+        pathParts.pop()
+        const folderPath = pathParts.join('/')
+        const targetFolderId = folderPath ? folderStructure[folderPath].folderId : currentFolderId
 
-        await handleUploadFile({ target: { files: [file] } }, targetFolderId);
+        await handleUploadFile({ target: { files: [file] } }, targetFolderId)
       }
 
-      alert('Folder uploaded successfully!');
+      alert('Folder uploaded successfully!')
     } catch (err) {
-      console.error('[ERROR] handleUploadFolder:', err);
-      alert('Upload folder failed: ' + err.message);
+      console.error('[ERROR] handleUploadFolder:', err)
+      alert('Upload folder failed: ' + err.message)
     }
-  };
-
-
+  }
 
   const handleShareFolder = async (folderId, recipientData) => {
     async function getAllFilesInFolder(fid) {
@@ -269,14 +273,12 @@ export default function Dashboard() {
     }
 
     const filesToShare = await getAllFilesInFolder(folderId)
-    console.log('[DEBUG] Files to share:', filesToShare.length)
 
     for (let file of filesToShare) {
       try {
         let ownerPublicKey
         const userPrivateKey = user.privateKey
 
-        // ✅ Kiểm tra xem file có phải của user không
         if (file.owner_id === user.userId) {
           ownerPublicKey = user.publicKey
         } else {
@@ -299,27 +301,19 @@ export default function Dashboard() {
           continue
         }
 
-        // ✅ THÊM userPublicKeyBase64
-        console.log('[DEBUG] Decrypting file key for:', file.original_filename)
         const decryptedFileKeyBase64 = await decryptFileKeyForUser({
           sealedBase64Url: file.encrypted_file_key_owner,
-          userPublicKeyBase64: user.publicKey,  // ✅ THÊM DÒNG NÀY
+          userPublicKeyBase64: user.publicKey,
           userPrivateKeyBase64: userPrivateKey
         })
 
-        console.log('[DEBUG] Encrypting for recipient:', recipientData.username)
         const recipientEncryptedKey = await encryptFileKeyForUser(decryptedFileKeyBase64, recipientData.public_key)
 
-        const { error: shareError } = await supabase.from('file_shares').insert({
+        await supabase.from('file_shares').insert({
           file_id: file.file_id,
           shared_with_user_id: recipientData.id,
           encrypted_file_key: recipientEncryptedKey
         })
-
-        if (shareError) {
-          console.error('[ERROR] Failed to save share for file:', file.original_filename, shareError)
-          continue
-        }
 
         console.log('[INFO] File shared successfully:', file.original_filename)
       } catch (err) {
@@ -328,9 +322,6 @@ export default function Dashboard() {
     }
   }
 
-
-
-  // Share modal handlers
   const openShareModal = (id, type) => {
     setShareModal({ visible: true, targetId: id, type })
     setShareUsername('')
@@ -368,7 +359,6 @@ export default function Dashboard() {
         let ownerPublicKey
         let userPrivateKey = user.privateKey
 
-        // ✅ SỬA: user.id → user.userId
         if (file.owner_id === user.userId) {
           ownerPublicKey = user.publicKey  
           userPrivateKey = user.privateKey
@@ -395,10 +385,9 @@ export default function Dashboard() {
         }
 
         console.debug('[DEBUG] Decrypting file key for file:', file.original_filename)
-        // ✅ THÊM userPublicKeyBase64
         const decryptedFileKeyBase64 = await decryptFileKeyForUser({
           sealedBase64Url: file.encrypted_file_key_owner,
-          userPublicKeyBase64: user.publicKey,  // ✅ THÊM DÒNG NÀY
+          userPublicKeyBase64: user.publicKey,
           userPrivateKeyBase64: userPrivateKey
         })
         console.debug('[DEBUG] Decrypted file key:', decryptedFileKeyBase64)
@@ -434,48 +423,45 @@ export default function Dashboard() {
   const handleShareFolderSubmit = async () => {
     try {
       if (!shareUsername) {
-        alert('Please enter a username to share with');
-        return;
+        alert('Please enter a username to share with')
+        return
       }
 
       const { data: recipientData, error: recipientError } = await supabase
         .from('users')
         .select('id, username, public_key')
         .eq('username', shareUsername)
-        .single();
+        .single()
 
       if (recipientError || !recipientData) {
-        alert('User not found');
-        return;
+        console.error('[ERROR] User to share not found:', recipientError)
+        alert('User not found')
+        return
       }
+      console.debug('[DEBUG] Recipient found:', recipientData)
 
-      // ✅ 1. Lưu folder share vào DB
       const { error: folderShareError } = await supabase
         .from('folder_shares')
         .insert({
           folder_id: shareModal.targetId,
           shared_with_user_id: recipientData.id
-        });
+        })
 
       if (folderShareError) {
-        console.error('[ERROR] Save folder share failed:', folderShareError);
-        alert('Failed to share folder');
-        return;
+        console.error('[ERROR] Save folder share failed:', folderShareError)
+        alert('Failed to share folder')
+        return
       }
 
-      // ✅ 2. Share tất cả files trong folder
-      await handleShareFolder(shareModal.targetId, recipientData);
+      await handleShareFolder(shareModal.targetId, recipientData)
 
-      alert('Folder shared successfully!');
-      closeShareModal();
+      alert('Folder shared successfully!')
+      closeShareModal()
     } catch (err) {
-      console.error('[ERROR] handleShareFolderSubmit:', err);
-      alert('Share folder failed: ' + err.message);
+      console.error('[ERROR] handleShareFolderSubmit:', err)
+      alert('Share folder failed: ' + err.message)
     }
   }
-
-
-
 
   const displayedFolders = [...folders.filter(f => f.parent_id === currentFolderId), ...sharedFolders.filter(f => f.parent_id === currentFolderId)]
   const displayedFiles = [...files.filter(f => f.folder_id === currentFolderId), ...sharedFiles.filter(f => f.folder_id === currentFolderId)] 
@@ -558,7 +544,8 @@ export default function Dashboard() {
               <span>{f.owner_id === user.userId ? user.username : 'Shared'}</span>
               <span>{f.created_at ? new Date(f.created_at).toLocaleString() : '-'}</span>
               <div style={{ display: 'flex', gap: 8 }}>
-                <span style={{ cursor: 'pointer' }} title="Download" onClick={() => handleOpen(f)}>⬇️</span>
+                {/* ✅ SỬA: Nhấn download thực sự tải file */}
+                <span style={{ cursor: 'pointer' }} title="Download" onClick={() => handleDownload(f)}>⬇️</span>
                 <span style={{ cursor: 'pointer' }} title="Share" onClick={() => openShareModal(f.file_id, 'file')}>🔗</span>
               </div>
             </div>
@@ -566,20 +553,63 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {/* Preview */}
+      {/* Preview Modal - ✅ SỬA: Chữ trắng cho text file */}
       {previewFile && (
         <div style={{ 
           position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, 
           background: 'rgba(0,0,0,0.8)', display: 'flex', 
-          alignItems: 'center', justifyContent: 'center' 
+          alignItems: 'center', justifyContent: 'center',
+          zIndex: 1000
         }}>
-          <div style={{ background: '#2c2c2c', padding: 20, borderRadius: 8, maxWidth: '90%', maxHeight: '90%' }}>
-            <h3>{previewFile.name}</h3>
-            {previewFile.type.startsWith('image') && <img src={previewFile.url} style={{ maxWidth: '80vw', maxHeight: '80vh' }} />}
-            {previewFile.type.startsWith('text') && <iframe src={previewFile.url} style={{ width: '80vw', height: '60vh', background: '#1a1a1a' }} />}
-            {previewFile.type.startsWith('audio') && <audio controls style={{ width: '80vw' }}><source src={previewFile.url} type={previewFile.type} /></audio>}
-            {previewFile.type.startsWith('video') && <video controls style={{ maxWidth: '80vw', maxHeight: '60vh' }}><source src={previewFile.url} type={previewFile.type} /></video>}
-            <div style={{ marginTop: 10, textAlign: 'right' }}><button onClick={() => setPreviewFile(null)}>Close</button></div>
+          <div style={{ background: '#2c2c2c', padding: 20, borderRadius: 8, maxWidth: '90%', maxHeight: '90%', overflow: 'auto' }}>
+            <h3 style={{ color: '#e3e3e3', marginBottom: 16 }}>{previewFile.name}</h3>
+            
+            {previewFile.type.startsWith('image') && (
+              <img src={previewFile.url} style={{ maxWidth: '80vw', maxHeight: '70vh', objectFit: 'contain' }} alt={previewFile.name} />
+            )}
+            
+            {previewFile.type.startsWith('text') && (
+              <iframe 
+                src={previewFile.url} 
+                style={{ 
+                  width: '80vw', 
+                  height: '60vh', 
+                  background: '#ffffffff',
+                  border: '1px solid #444',
+                  color: '#e3e3e3' 
+                }} 
+              />
+            )}
+            
+            {previewFile.type.startsWith('audio') && (
+              <audio controls style={{ width: '80vw' }}>
+                <source src={previewFile.url} type={previewFile.type} />
+              </audio>
+            )}
+            
+            {previewFile.type.startsWith('video') && (
+              <video controls style={{ maxWidth: '80vw', maxHeight: '60vh' }}>
+                <source src={previewFile.url} type={previewFile.type} />
+              </video>
+            )}
+            
+            {previewFile.type === 'application/pdf' && (
+              <iframe 
+                src={previewFile.url} 
+                style={{ width: '80vw', height: '70vh', border: '1px solid #444' }} 
+              />
+            )}
+            
+            <div style={{ marginTop: 16, textAlign: 'right', display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+              <button onClick={() => {
+                // ✅ Tải file từ preview
+                const a = document.createElement('a')
+                a.href = previewFile.url
+                a.download = previewFile.name
+                a.click()
+              }}>Download</button>
+              <button onClick={() => setPreviewFile(null)}>Close</button>
+            </div>
           </div>
         </div>
       )}
@@ -589,7 +619,8 @@ export default function Dashboard() {
         <div style={{
           position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
           background: 'rgba(0,0,0,0.5)', display: 'flex',
-          alignItems: 'center', justifyContent: 'center'
+          alignItems: 'center', justifyContent: 'center',
+          zIndex: 1000
         }}>
           <div style={{ background: '#2c2c2c', padding: 20, borderRadius: 8, minWidth: 300 }}>
             <h3>Share {shareModal.type}</h3>
@@ -598,7 +629,7 @@ export default function Dashboard() {
               placeholder="Enter username"
               value={shareUsername}
               onChange={e => setShareUsername(e.target.value)}
-              style={{ width: '100%', marginBottom: 10, padding: 4 }}
+              style={{ width: '100%', marginBottom: 10, padding: 4, color: '#000' }}
             />
             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
               <button onClick={closeShareModal}>Cancel</button>
