@@ -12,7 +12,7 @@ export async function encryptFileKeyForUser(fileKeyBase64, recipientPublicKeyBas
   return sodium.to_base64(sealed, sodium.base64_variants.URLSAFE_NO_PADDING)
 }
 
-export async function decryptFileKeyForUser(sealedBase64Url, senderPublicKeyBase64, userPrivateKeyBase64) {
+export async function decryptFileKeyForUser({ sealedBase64Url, senderPublicKeyBase64, userPrivateKeyBase64 }) {
   await sodium.ready
   console.log('[DEBUG] decryptFileKeyForUser params:', { sealedBase64Url, senderPublicKeyBase64, userPrivateKeyBase64 })
 

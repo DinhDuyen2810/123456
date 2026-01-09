@@ -220,7 +220,7 @@ export default function Dashboard() {
 
         if (file.owner_id === user.id) {
           // Nếu file của chính user
-          ownerPublicKey = user.public_key   // sửa từ user.publicKey → user.public_key
+          ownerPublicKey = user.publicKey  
           userPrivateKey = user.privateKey   // privateKey đã giải mã
         } else {
           // Nếu file của người khác
@@ -246,15 +246,14 @@ export default function Dashboard() {
         }
 
         console.debug('[DEBUG] Decrypting file key for file:', file.original_filename)
-        const decryptedFileKey = await decryptFileKeyForUser({
+        const decryptedFileKeyBase64 = await decryptFileKeyForUser({
           sealedBase64Url: file.encrypted_file_key_owner,
           senderPublicKeyBase64: ownerPublicKey,
           userPrivateKeyBase64: userPrivateKey
         })
-        console.debug('[DEBUG] Decrypted file key:', decryptedFileKey)
-
+        console.debug('[DEBUG] Decrypted file key:', decryptedFileKeyBase64)
         // 4️⃣ Encrypt file key cho recipient
-        const recipientEncryptedKey = await encryptFileKeyForUser(decryptedFileKey, recipientData.public_key)
+        const recipientEncryptedKey = await encryptFileKeyForUser(decryptedFileKeyBase64, recipientData.public_key)
         console.debug('[DEBUG] Encrypted file key for recipient:', recipientEncryptedKey)
 
         // 5️⃣ Lưu thông tin chia sẻ vào DB
