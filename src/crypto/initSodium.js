@@ -1,3 +1,4 @@
+// src/crypto/initSodium.js
 import sodium from 'libsodium-wrappers-sumo'
 
 let readyPromise = null

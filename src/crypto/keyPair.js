@@ -1,7 +1,12 @@
-import sodium from 'libsodium-wrappers-sumo'
+// src/crypto/keyPair.js
+import { initSodium } from './initSodium.js'
 
+/**
+ * Generate an asymmetric keypair for a user
+ * @returns {Promise<{publicKey: string, privateKey: string}>} Base64
+ */
 export async function generateKeyPair() {
-  await sodium.ready
+  const sodium = await initSodium()
 
   const { publicKey, privateKey } = sodium.crypto_box_keypair()
 
