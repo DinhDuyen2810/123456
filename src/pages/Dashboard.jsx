@@ -89,11 +89,11 @@ export default function Dashboard() {
       const ownerPublicKey = ownerData.public_key
       console.log('[DEBUG] Opening file:', file.original_filename, { ownerPublicKey, userPrivateKey: user.privateKey })
 
-      const decryptedFileKeyBase64 = await decryptFileKeyForUser(
-        file.encrypted_file_key_owner,
-        ownerPublicKey,
-        user.privateKey
-      )
+      const decryptedFileKeyBase64 = await decryptFileKeyForUser({
+        sealedBase64Url: file.encrypted_file_key_owner,
+        senderPublicKeyBase64: ownerPublicKey,
+        userPrivateKeyBase64: user.privateKey
+      })
       console.log('[DEBUG] FileKey decrypted:', decryptedFileKeyBase64)
 
       const decrypted = await decryptFile(encryptedBytes, decryptedFileKeyBase64, file.iv)
@@ -141,6 +141,41 @@ export default function Dashboard() {
     }
   }
 
+  const handleUploadFolder = async (event) => {
+    const files = event.target.files
+    if (!files || files.length === 0) return
+
+    for (let file of files) {
+      try {
+        const { encryptedFile, fileKey, iv } = await encryptFile(await file.arrayBuffer())
+        const fileId = crypto.randomUUID()
+        const safeName = file.name.replace(/[^a-zA-Z0-9.\-_]/g, '_')
+        const storagePath = `demo/${fileId}_${safeName}`
+
+        await supabase.storage.from('encrypted-files').upload(storagePath, new Blob([encryptedFile]), { upsert: true })
+
+        const { data: ownerData } = await supabase.from('users').select('public_key').eq('id', user.userId).single()
+        const encryptedFileKeyOwner = await encryptFileKeyForUser(fileKey, ownerData.public_key)
+
+        const { data: newFile } = await supabase.from('files').insert([{
+          file_id: fileId,
+          owner_id: user.userId,
+          folder_id: currentFolderId,
+          storage_path: storagePath,
+          encrypted_file_key_owner: encryptedFileKeyOwner,
+          original_filename: file.name,
+          mime_type: file.type,
+          iv
+        }]).select().single()
+
+        setFiles(prev => [...prev, newFile])
+      } catch (err) {
+        console.error('[ERROR] handleUploadFolder:', err)
+        alert('Upload folder failed: ' + err.message)
+      }
+    }
+  }
+
   // Share modal handlers
   const openShareModal = (id, type) => {
     setShareModal({ visible: true, targetId: id, type })
@@ -152,99 +187,80 @@ export default function Dashboard() {
     setShareUsername('')
   }
 
+  // Share submit
   const handleShareSubmit = async () => {
-    if (!shareUsername) return alert('Enter username to share!')
-
     try {
-      console.log('[DEBUG] Share submit target:', shareModal, 'username:', shareUsername)
+      if (!shareUsername) {
+        alert('Please enter a username to share with')
+        return
+      }
 
-      const { data: userToShare } = await supabase
+      // 1️⃣ Tìm người nhận theo username
+      const { data: recipientData, error: recipientError } = await supabase
         .from('users')
-        .select('*')
+        .select('id, username, public_key')
         .eq('username', shareUsername)
         .single()
 
-      if (!userToShare) throw new Error('User not found')
-      console.log('[DEBUG] User to share found:', userToShare)
+      if (recipientError || !recipientData) {
+        console.error('[ERROR] User to share not found:', recipientError)
+        alert('User not found')
+        return
+      }
+      console.debug('[DEBUG] Recipient found:', recipientData)
 
-      if (shareModal.type === 'file') {
-        const { data: fileData } = await supabase.from('files').select('*').eq('file_id', shareModal.targetId).single()
-        if (!fileData) throw new Error('File not found')
-        console.log('[DEBUG] File data:', fileData)
+      // 2️⃣ Xác định file(s) để share
+      const targetIds = Array.isArray(shareModal.targetId) ? shareModal.targetId : [shareModal.targetId]
+      const filesToShare = files.filter(f => targetIds.includes(f.file_id))
 
-        const { data: recipientData } = await supabase.from('users').select('public_key').eq('id', userToShare.id).single()
-        console.log('[DEBUG] Recipient public key:', recipientData.public_key)
+      // 3️⃣ Lặp qua từng file để share
+      for (let file of filesToShare) {
+        const { data: ownerData } = await supabase
+          .from('users')
+          .select('public_key')
+          .eq('id', file.owner_id)
+          .single()
 
-        let ownerPublicKey
-        if (fileData.owner_id === user.userId) {
-          ownerPublicKey = user.publicKey
-        } else {
-          const { data: ownerData } = await supabase.from('users').select('public_key').eq('id', fileData.owner_id).single()
-          if (!ownerData || !ownerData.public_key) throw new Error('Owner public key missing')
-          ownerPublicKey = ownerData.public_key
-        }
-        console.log('[DEBUG] Owner public key:', ownerPublicKey)
-
-        const decryptedFileKey = await decryptFileKeyForUser(
-          fileData.encrypted_file_key_owner,
-          ownerPublicKey,
-          user.privateKey
-        )
-        console.log('[DEBUG] File key decrypted:', decryptedFileKey)
-
-        const encryptedForRecipient = await encryptFileKeyForUser(decryptedFileKey, recipientData.public_key)
-        console.log('[DEBUG] File key encrypted for recipient:', encryptedForRecipient)
-
-        await supabase.from('file_shares').insert([{
-          file_id: shareModal.targetId,
-          shared_with_user_id: userToShare.id,
-          encrypted_file_key: encryptedForRecipient
-        }])
-      } else if (shareModal.type === 'folder') {
-        console.log('[DEBUG] Sharing folder id:', shareModal.targetId)
-
-        await supabase.from('folder_shares').insert([{ folder_id: shareModal.targetId, shared_with_user_id: userToShare.id }])
-
-        const getAllFilesInFolder = async (folderId) => {
-          const { data: files } = await supabase.from('files').select('*').eq('folder_id', folderId)
-          const { data: subfolders } = await supabase.from('folders').select('folder_id').eq('parent_id', folderId)
-
-          let allFiles = [...(files || [])]
-          if (subfolders && subfolders.length > 0) {
-            for (let sub of subfolders) {
-              const subFiles = await getAllFilesInFolder(sub.folder_id)
-              allFiles = allFiles.concat(subFiles)
-            }
-          }
-          return allFiles
+        if (!ownerData?.public_key) {
+          console.error('[ERROR] Owner public key missing for file:', file.original_filename)
+          continue
         }
 
-        const allFiles = await getAllFilesInFolder(shareModal.targetId)
-        console.log('[DEBUG] All files in folder to share:', allFiles.map(f => f.file_id))
+        const userPrivateKey = user.privateKey
+        if (!userPrivateKey) {
+          console.error('[ERROR] User private key missing')
+          alert('Your private key is missing')
+          return
+        }
 
-        for (let file of allFiles) {
-          const { data: recipientData } = await supabase.from('users').select('public_key').eq('id', userToShare.id).single()
+        const decryptedFileKey = await decryptFileKeyForUser({
+          sealedBase64Url: file.encrypted_file_key_owner,
+          senderPublicKeyBase64: ownerData.public_key,
+          userPrivateKeyBase64: userPrivateKey
+        })
+        console.debug('[DEBUG] Decrypted file key:', decryptedFileKey)
 
-          const ownerPublicKey =
-            file.owner_id === user.userId ? user.publicKey : (file.ownerPublicKey || await (async () => {
-              const { data: ownerData } = await supabase.from('users').select('public_key').eq('id', file.owner_id).single()
-              return ownerData.public_key
-            })())
+        const recipientEncryptedKey = await encryptFileKeyForUser(decryptedFileKey, recipientData.public_key)
+        console.debug('[DEBUG] Encrypted file key for recipient:', recipientEncryptedKey)
 
-          console.log('[DEBUG] Sharing file:', file.file_id, { ownerPublicKey })
-
-          const decryptedFileKey = await decryptFileKeyForUser(file.encrypted_file_key_owner, ownerPublicKey, user.privateKey)
-          const encryptedForRecipient = await encryptFileKeyForUser(decryptedFileKey, recipientData.public_key)
-
-          await supabase.from('file_shares').insert([{
+        const { data: shareResult, error: shareError } = await supabase
+          .from('file_shares')
+          .insert({
             file_id: file.file_id,
-            shared_with_user_id: userToShare.id,
-            encrypted_file_key: encryptedForRecipient
-          }])
+            shared_with_user_id: recipientData.id,
+            encrypted_file_key: recipientEncryptedKey
+          })
+
+        if (shareError) {
+          console.error('[ERROR] Failed to save share:', shareError)
+          alert(`Failed to share file ${file.original_filename}`)
+          continue
         }
+
+        console.log('[INFO] File shared successfully:', file.original_filename)
       }
 
-      alert(`Shared with ${shareUsername}`)
+      alert('File(s) shared successfully!')
       closeShareModal()
     } catch (err) {
       console.error('[ERROR] handleShareSubmit:', err)
@@ -266,7 +282,6 @@ export default function Dashboard() {
         </div>
         <div style={{ marginTop: 'auto' }}>User: <b>{user?.username}</b></div>
 
-        {/* Hidden inputs */}
         <input
           type="file"
           id="upload-file-input"
@@ -298,7 +313,7 @@ export default function Dashboard() {
           {selection.size > 0 && (
             <div style={{ display: 'flex', gap: 8 }}>
               <button onClick={() => alert('Download selected TODO')}>Download</button>
-              <button onClick={() => openShareModal(Array.from(selection), 'multiple')}>Share</button>
+              <button onClick={() => openShareModal(Array.from(selection)[0], 'file')}>Share</button>
             </div>
           )}
         </div>
@@ -343,7 +358,6 @@ export default function Dashboard() {
       </div>
 
       {/* Preview */}
-      {/* Preview */}
       {previewFile && (
         <div style={{ 
           position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, 
@@ -352,40 +366,14 @@ export default function Dashboard() {
         }}>
           <div style={{ background: '#2c2c2c', padding: 20, borderRadius: 8, maxWidth: '90%', maxHeight: '90%' }}>
             <h3>{previewFile.name}</h3>
-
-            {/* Xem trước hình ảnh (PNG, JPG, GIF, …) */}
-            {previewFile.type.startsWith('image') && (
-              <img src={previewFile.url} style={{ maxWidth: '80vw', maxHeight: '80vh' }} />
-            )}
-
-            {/* Xem trước văn bản */}
-            {previewFile.type.startsWith('text') && (
-              <iframe src={previewFile.url} style={{ width: '80vw', height: '60vh', background: '#1a1a1a' }} />
-            )}
-
-            {/* Xem trước audio */}
-            {previewFile.type.startsWith('audio') && (
-              <audio controls style={{ width: '80vw' }}>
-                <source src={previewFile.url} type={previewFile.type} />
-                Your browser does not support the audio element.
-              </audio>
-            )}
-
-            {/* Xem trước video */}
-            {previewFile.type.startsWith('video') && (
-              <video controls style={{ maxWidth: '80vw', maxHeight: '60vh' }}>
-                <source src={previewFile.url} type={previewFile.type} />
-                Your browser does not support the video element.
-              </video>
-            )}
-
-            <div style={{ marginTop: 10, textAlign: 'right' }}>
-              <button onClick={() => setPreviewFile(null)}>Close</button>
-            </div>
+            {previewFile.type.startsWith('image') && <img src={previewFile.url} style={{ maxWidth: '80vw', maxHeight: '80vh' }} />}
+            {previewFile.type.startsWith('text') && <iframe src={previewFile.url} style={{ width: '80vw', height: '60vh', background: '#1a1a1a' }} />}
+            {previewFile.type.startsWith('audio') && <audio controls style={{ width: '80vw' }}><source src={previewFile.url} type={previewFile.type} /></audio>}
+            {previewFile.type.startsWith('video') && <video controls style={{ maxWidth: '80vw', maxHeight: '60vh' }}><source src={previewFile.url} type={previewFile.type} /></video>}
+            <div style={{ marginTop: 10, textAlign: 'right' }}><button onClick={() => setPreviewFile(null)}>Close</button></div>
           </div>
         </div>
       )}
-
 
       {/* Share Modal */}
       {shareModal.visible && (

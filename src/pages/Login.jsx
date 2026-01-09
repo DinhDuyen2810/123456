@@ -48,7 +48,8 @@ export default function Login() {
       saveSession({
         userId: user.id,
         username: user.username,
-        privateKey
+        privateKey,
+        publicKey: user.public_key
       })
 
       navigate('/dashboard')
