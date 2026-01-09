@@ -25,10 +25,23 @@ export async function encryptFileKeyForUser(fileKey, userPublicKeyBase64) {
 
 export async function decryptFileKeyForUser(sealedBase64Url, userPublicKeyBase64, userPrivateKeyBase64) {
   await sodium.ready
+
+  // decode sealed
   const sealed = sodium.from_base64(sealedBase64Url, sodium.base64_variants.URLSAFE_NO_PADDING)
-  const userPublicKey = sodium.from_base64(userPublicKeyBase64)
-  const userPrivateKey = sodium.from_base64(userPrivateKeyBase64)
+
+  // decode keys từ base64 → Uint8Array
+  const userPublicKey = typeof userPublicKeyBase64 === 'string'
+    ? sodium.from_base64(userPublicKeyBase64, sodium.base64_variants.URLSAFE_NO_PADDING)
+    : userPublicKeyBase64
+
+  const userPrivateKey = typeof userPrivateKeyBase64 === 'string'
+    ? sodium.from_base64(userPrivateKeyBase64, sodium.base64_variants.URLSAFE_NO_PADDING)
+    : userPrivateKeyBase64
+
+  // giải mã
   const decrypted = sodium.crypto_box_seal_open(sealed, userPublicKey, userPrivateKey)
   if (!decrypted) throw new Error('Decryption failed')
-  return new TextDecoder().decode(decrypted) // convert Uint8Array → string
+
+  return new TextDecoder().decode(decrypted)
 }
+
