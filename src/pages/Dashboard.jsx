@@ -79,10 +79,27 @@ export default function Dashboard() {
 
   const handleOpen = async (file) => {
     try {
-      const { data } = await supabase.storage.from('encrypted-files').download(file.storage_path)
+      // Download
+      const { data, error } = await supabase.storage.from('encrypted-files').download(file.storage_path)
+      if (error) throw error
+
       const buffer = await data.arrayBuffer()
-      const decryptedKey = await decryptFileKeyForUser(file.encrypted_file_key_owner, file.owner_id, user.privateKey)
-      const decrypted = await decryptFile(buffer, decryptedKey)
+      const encryptedBytes = new Uint8Array(buffer)
+
+      // Lấy publicKey owner
+      const { data: ownerData } = await supabase.from('users').select('public_key').eq('id', file.owner_id).single()
+      const ownerPublicKey = ownerData.public_key
+
+      // Giải mã fileKey → base64
+      const decryptedFileKeyBase64 = await decryptFileKeyForUser(
+        file.encrypted_file_key_owner,
+        ownerPublicKey,
+        user.privateKey
+      )
+
+      // Giải mã file thực tế
+      const decrypted = await decryptFile(encryptedBytes, decryptedFileKeyBase64, file.iv)
+
       const blob = new Blob([decrypted], { type: file.mime_type })
       const url = URL.createObjectURL(blob)
       setPreviewFile({ url, name: file.original_filename, type: file.mime_type })
@@ -91,6 +108,9 @@ export default function Dashboard() {
       alert('Open file failed: ' + err.message)
     }
   }
+
+
+
 
   const handleUploadFile = async (event, folderId = currentFolderId) => {
     const file = event.target.files[0]
@@ -272,16 +292,49 @@ export default function Dashboard() {
       </div>
 
       {/* Preview */}
+      {/* Preview */}
       {previewFile && (
-        <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.8)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-          <div style={{ background: '#2c2c2c', padding: 20, borderRadius: 8 }}>
+        <div style={{ 
+          position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, 
+          background: 'rgba(0,0,0,0.8)', display: 'flex', 
+          alignItems: 'center', justifyContent: 'center' 
+        }}>
+          <div style={{ background: '#2c2c2c', padding: 20, borderRadius: 8, maxWidth: '90%', maxHeight: '90%' }}>
             <h3>{previewFile.name}</h3>
-            {previewFile.type.startsWith('image') && <img src={previewFile.url} style={{ maxWidth: 600, maxHeight: 600 }} />}
-            {previewFile.type.startsWith('text') && <iframe src={previewFile.url} style={{ width: 600, height: 400 }} />}
-            <button onClick={() => setPreviewFile(null)}>Close</button>
+
+            {/* Xem trước hình ảnh (PNG, JPG, GIF, …) */}
+            {previewFile.type.startsWith('image') && (
+              <img src={previewFile.url} style={{ maxWidth: '80vw', maxHeight: '80vh' }} />
+            )}
+
+            {/* Xem trước văn bản */}
+            {previewFile.type.startsWith('text') && (
+              <iframe src={previewFile.url} style={{ width: '80vw', height: '60vh', background: '#1a1a1a' }} />
+            )}
+
+            {/* Xem trước audio */}
+            {previewFile.type.startsWith('audio') && (
+              <audio controls style={{ width: '80vw' }}>
+                <source src={previewFile.url} type={previewFile.type} />
+                Your browser does not support the audio element.
+              </audio>
+            )}
+
+            {/* Xem trước video */}
+            {previewFile.type.startsWith('video') && (
+              <video controls style={{ maxWidth: '80vw', maxHeight: '60vh' }}>
+                <source src={previewFile.url} type={previewFile.type} />
+                Your browser does not support the video element.
+              </video>
+            )}
+
+            <div style={{ marginTop: 10, textAlign: 'right' }}>
+              <button onClick={() => setPreviewFile(null)}>Close</button>
+            </div>
           </div>
         </div>
       )}
+
 
       {/* Share Modal */}
       {shareModal.visible && (
