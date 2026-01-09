@@ -187,7 +187,7 @@ export default function Dashboard() {
     setShareUsername('')
   }
 
-  // Share submit
+
   const handleShareSubmit = async () => {
     try {
       if (!shareUsername) {
@@ -215,34 +215,49 @@ export default function Dashboard() {
 
       // 3️⃣ Lặp qua từng file để share
       for (let file of filesToShare) {
-        const { data: ownerData } = await supabase
-          .from('users')
-          .select('public_key')
-          .eq('id', file.owner_id)
-          .single()
+        let ownerPublicKey
+        let userPrivateKey = user.privateKey  // phải đảm bảo đã set khi load session
 
-        if (!ownerData?.public_key) {
-          console.error('[ERROR] Owner public key missing for file:', file.original_filename)
+        if (file.owner_id === user.id) {
+          // Nếu file của chính user
+          ownerPublicKey = user.public_key   // sửa từ user.publicKey → user.public_key
+          userPrivateKey = user.privateKey   // privateKey đã giải mã
+        } else {
+          // Nếu file của người khác
+          const { data: ownerData, error: ownerError } = await supabase
+            .from('users')
+            .select('public_key')
+            .eq('id', file.owner_id)
+            .single()
+
+          if (ownerError || !ownerData?.public_key) {
+            console.error('[ERROR] Owner public key missing for file:', file.original_filename, ownerError)
+            alert(`Cannot get owner public key for file ${file.original_filename}`)
+            continue
+          }
+
+          ownerPublicKey = ownerData.public_key
+        }
+
+        if (!ownerPublicKey || !userPrivateKey) {
+          console.error('[ERROR] Missing keys', { ownerPublicKey, userPrivateKey })
+          alert('Missing keys, cannot decrypt file key')
           continue
         }
 
-        const userPrivateKey = user.privateKey
-        if (!userPrivateKey) {
-          console.error('[ERROR] User private key missing')
-          alert('Your private key is missing')
-          return
-        }
-
+        console.debug('[DEBUG] Decrypting file key for file:', file.original_filename)
         const decryptedFileKey = await decryptFileKeyForUser({
           sealedBase64Url: file.encrypted_file_key_owner,
-          senderPublicKeyBase64: ownerData.public_key,
+          senderPublicKeyBase64: ownerPublicKey,
           userPrivateKeyBase64: userPrivateKey
         })
         console.debug('[DEBUG] Decrypted file key:', decryptedFileKey)
 
+        // 4️⃣ Encrypt file key cho recipient
         const recipientEncryptedKey = await encryptFileKeyForUser(decryptedFileKey, recipientData.public_key)
         console.debug('[DEBUG] Encrypted file key for recipient:', recipientEncryptedKey)
 
+        // 5️⃣ Lưu thông tin chia sẻ vào DB
         const { data: shareResult, error: shareError } = await supabase
           .from('file_shares')
           .insert({
@@ -267,6 +282,8 @@ export default function Dashboard() {
       alert('Share failed: ' + err.message)
     }
   }
+
+
 
   const displayedFolders = [...folders.filter(f => f.parent_id === currentFolderId), ...sharedFolders.filter(f => f.parent_id === currentFolderId)]
   const displayedFiles = [...files.filter(f => f.folder_id === currentFolderId), ...sharedFiles.filter(f => f.folder_id === currentFolderId)] 
