@@ -1,9 +1,43 @@
 // src/crypto/fileEncryption.js
-export async function encryptFile(fileBuffer) {
-  // Tạo random file key
-  const fileKeyBytes = crypto.getRandomValues(new Uint8Array(32)) // 256-bit key
-  const iv = crypto.getRandomValues(new Uint8Array(12)) // 96-bit IV
+import { initSodium } from './initSodium.js'
 
+
+export async function encryptWithKey(data, keyBase64) {
+  const sodium = await initSodium()
+
+  const key = sodium.from_base64(keyBase64)
+  const nonce = sodium.randombytes_buf(sodium.crypto_secretbox_NONCEBYTES)
+
+  const cipher = sodium.crypto_secretbox_easy(
+    sodium.from_string(data),
+    nonce,
+    key
+  )
+
+  return {
+    cipher: sodium.to_base64(cipher),
+    nonce: sodium.to_base64(nonce)
+  }
+}
+
+
+export async function decryptWithKey(encrypted, keyBase64) {
+  const sodium = await initSodium()
+
+  const key = sodium.from_base64(keyBase64)
+  const cipher = sodium.from_base64(encrypted.cipher)
+  const nonce = sodium.from_base64(encrypted.nonce)
+
+  const plain = sodium.crypto_secretbox_open_easy(cipher, nonce, key)
+  if (!plain) throw new Error('Decryption failed')
+
+  return sodium.to_string(plain)
+}
+
+// src/crypto/fileEncryption.js
+export async function encryptFile(fileBuffer) {
+  const fileKeyBytes = crypto.getRandomValues(new Uint8Array(32))
+  const iv = crypto.getRandomValues(new Uint8Array(12))
   const cryptoKey = await crypto.subtle.importKey(
     'raw',
     fileKeyBytes,
@@ -11,19 +45,18 @@ export async function encryptFile(fileBuffer) {
     false,
     ['encrypt']
   )
-
   const encryptedBuffer = await crypto.subtle.encrypt(
     { name: 'AES-GCM', iv },
     cryptoKey,
     fileBuffer
   )
-
   return {
     encryptedFile: new Uint8Array(encryptedBuffer),
     fileKey: arrayBufferToBase64(fileKeyBytes),
-    iv: arrayBufferToBase64(iv)
+    iv: arrayBufferToBase64(iv) // <-- return base64 iv
   }
 }
+
 
 export async function decryptFile(encryptedBytes, fileKeyBase64, ivBase64) {
   if (!ivBase64) throw new Error('nonce cannot be null or undefined')
@@ -66,3 +99,4 @@ function base64ToUint8Array(base64) {
   }
   return bytes
 }
+

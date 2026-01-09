@@ -116,7 +116,7 @@ export default function Dashboard() {
     const file = event.target.files[0]
     if (!file) return
     try {
-      const { encryptedFile, fileKey } = await encryptFile(await file.arrayBuffer())
+      const { encryptedFile, fileKey, iv} = await encryptFile(await file.arrayBuffer())
       const fileId = crypto.randomUUID()
       const safeName = file.name.replace(/[^a-zA-Z0-9.\-_]/g, '_')
       const storagePath = `demo/${fileId}_${safeName}`
@@ -133,7 +133,8 @@ export default function Dashboard() {
         storage_path: storagePath,
         encrypted_file_key_owner: encryptedFileKeyOwner,
         original_filename: file.name,
-        mime_type: file.type
+        mime_type: file.type,
+        iv
       }]).select().single()
 
       setFiles(prev => [...prev, newFile])
