@@ -34,68 +34,56 @@ export default function Dashboard() {
     if (!user) return
     async function loadData() {
       try {
+        // Folders/files của user
         const { data: myFolders } = await supabase.from('folders').select('*').eq('owner_id', user.userId)
         const { data: myFiles } = await supabase.from('files').select('*').eq('owner_id', user.userId)
         setFolders(myFolders || [])
         setFiles(myFiles || [])
 
-        const { data: sharedFileLinks } = await supabase.from('file_shares').select('file_id').eq('shared_with_user_id', user.userId)
-        
         // Shared files
-        if (sharedFileLinks && sharedFileLinks.length > 0) {
-          const { data: sharedFilesData } = await supabase
-            .from('file_shares')
-            .select(`
-              id,
-              file_id,
-              shared_with_user_id,
-              files(*)
-            `)
-            .eq('shared_with_user_id', user.userId)
+        const { data: sharedFilesData } = await supabase
+          .from('file_shares')
+          .select(`
+            id,
+            file_id,
+            shared_with_user_id,
+            files(*)
+          `)
+          .eq('shared_with_user_id', user.userId)
 
-          const mappedSharedFiles = sharedFilesData.map(s => ({
-            ...s.files,
-            shared_id: s.id // <-- đây là quan trọng
-          }))
+        const mappedSharedFiles = sharedFilesData.map(s => ({
+          ...s.files,
+          shared_id: s.id
+        }))
+        setSharedFiles(mappedSharedFiles || [])
 
-          setSharedFiles(mappedSharedFiles || [])
-        } else {
-          setSharedFiles([])
-        }
-
-
-        const { data: sharedFolderLinks } = await supabase.from('folder_shares').select('folder_id').eq('shared_with_user_id', user.userId)
-        
         // Shared folders
-        if (sharedFolderLinks && sharedFolderLinks.length > 0) {
-          const { data: sharedFoldersData } = await supabase
-            .from('folder_shares')
-            .select(`
-              id,
-              folder_id,
-              shared_with_user_id,
-              folders(*)
-            `)
-            .eq('shared_with_user_id', user.userId)
+        const { data: sharedFoldersData } = await supabase
+          .from('folder_shares')
+          .select(`
+            id,
+            folder_id,
+            shared_with_user_id,
+            parent_share_id,
+            folders(*)
+          `)
+          .eq('shared_with_user_id', user.userId)
 
-          const mappedSharedFolders = sharedFoldersData.map(s => ({
-            ...s.folders,
-            shared_id: s.id
-          }))
+        const mappedSharedFolders = sharedFoldersData.map(s => ({
+          ...s.folders,
+          shared_id: s.id,
+          parent_id: s.parent_share_id || s.folders.parent_id
+        }))
+        setSharedFolders(mappedSharedFolders || [])
 
-          setSharedFolders(mappedSharedFolders || [])
-        } else {
-          setSharedFolders([])
-        }
-
-
-        console.log('[DEBUG] Data loaded:', { myFolders, myFiles, sharedFilesData: sharedFiles, sharedFoldersData: sharedFolders })
+        console.log('[DEBUG] Data loaded', { myFolders, myFiles, sharedFilesData: mappedSharedFiles, sharedFoldersData: mappedSharedFolders })
       } catch (err) {
         console.error('[ERROR] loadData:', err)
       }
     }
     loadData()
   }, [user])
+
 
   const toggleSelect = (id) => {
     const newSet = new Set(selection)
@@ -292,67 +280,102 @@ export default function Dashboard() {
     }
   }
 
-  const handleShareFolder = async (folderId, recipientData) => {
-    async function getAllFilesInFolder(fid) {
-      const { data: filesInFolder } = await supabase.from('files').select('*').eq('folder_id', fid)
-      const { data: subfolders } = await supabase.from('folders').select('*').eq('parent_id', fid)
-      let allFiles = [...(filesInFolder || [])]
-
-      for (let sf of subfolders || []) {
-        allFiles = allFiles.concat(await getAllFilesInFolder(sf.folder_id))
-      }
-      return allFiles
-    }
-
-    const filesToShare = await getAllFilesInFolder(folderId)
-
-    for (let file of filesToShare) {
-      try {
-        let ownerPublicKey
-        const userPrivateKey = user.privateKey
-
-        if (file.owner_id === user.userId) {
-          ownerPublicKey = user.publicKey
-        } else {
-          const { data: ownerData, error: ownerError } = await supabase
-            .from('users')
-            .select('public_key')
-            .eq('id', file.owner_id)
-            .single()
-
-          if (ownerError || !ownerData?.public_key) {
-            console.error('[ERROR] Owner public key missing for file:', file.original_filename, ownerError)
-            continue
-          }
-
-          ownerPublicKey = ownerData.public_key
+  const handleShareFolder = async (rootFolderId, recipientData) => {
+    try {
+      // 🌳 Lấy folder gốc + tất cả subfolder đệ quy
+      const getAllSubfolders = async (fid) => {
+        const { data: subfolders } = await supabase.from('folders').select('*').eq('parent_id', fid)
+        let allSubs = [...(subfolders || [])]
+        for (let sf of subfolders || []) {
+          allSubs = allSubs.concat(await getAllSubfolders(sf.folder_id))
         }
+        return allSubs
+      }
 
-        if (!ownerPublicKey || !userPrivateKey || !user.publicKey) {
-          console.error('[ERROR] Missing keys', { ownerPublicKey, userPrivateKey, userPublicKey: user.publicKey })
+      const { data: rootFolderData } = await supabase.from('folders').select('*').eq('folder_id', rootFolderId).single()
+      const subfolders = await getAllSubfolders(rootFolderId)
+      const allFolders = [rootFolderData, ...subfolders]
+
+      // 🌿 Map folder_id → folder_share.id
+      const folderShareIdMap = {}
+
+      for (let folder of allFolders) {
+        const parentShareId = folder.parent_id ? folderShareIdMap[folder.parent_id] : null
+
+        // Insert folder_share
+        const { data: folderShare, error } = await supabase.from('folder_shares')
+          .insert({
+            folder_id: folder.folder_id,
+            shared_with_user_id: recipientData.id,
+            parent_share_id: parentShareId
+          })
+          .select()
+          .single()
+
+        if (error) {
+          console.error('[ERROR] Failed to share folder:', folder.name, error)
           continue
         }
 
-        const decryptedFileKeyBase64 = await decryptFileKeyForUser({
-          sealedBase64Url: file.encrypted_file_key_owner,
-          userPublicKeyBase64: user.publicKey,
-          userPrivateKeyBase64: userPrivateKey
-        })
-
-        const recipientEncryptedKey = await encryptFileKeyForUser(decryptedFileKeyBase64, recipientData.public_key)
-
-        await supabase.from('file_shares').insert({
-          file_id: file.file_id,
-          shared_with_user_id: recipientData.id,
-          encrypted_file_key: recipientEncryptedKey
-        })
-
-        console.log('[INFO] File shared successfully:', file.original_filename)
-      } catch (err) {
-        console.error('[ERROR] Failed to share file:', file.original_filename, err)
+        folderShareIdMap[folder.folder_id] = folderShare.id
       }
+
+      // 🌐 Share tất cả files trong folder + subfolder
+      const getAllFilesInFolder = async (fid) => {
+        const { data: filesInFolder } = await supabase.from('files').select('*').eq('folder_id', fid)
+        const { data: subfolders } = await supabase.from('folders').select('*').eq('parent_id', fid)
+        let allFiles = [...(filesInFolder || [])]
+        for (let sf of subfolders || []) {
+          allFiles = allFiles.concat(await getAllFilesInFolder(sf.folder_id))
+        }
+        return allFiles
+      }
+
+      const allFiles = await getAllFilesInFolder(rootFolderId)
+
+      for (let file of allFiles) {
+        try {
+          const userPrivateKey = user.privateKey
+          const ownerPublicKey = file.owner_id === user.userId
+            ? user.publicKey
+            : (await supabase.from('users').select('public_key').eq('id', file.owner_id).single()).data.public_key
+
+          const decryptedFileKeyBase64 = await decryptFileKeyForUser({
+            sealedBase64Url: file.encrypted_file_key_owner,
+            userPublicKeyBase64: user.publicKey,
+            userPrivateKeyBase64: userPrivateKey
+          })
+
+          const recipientEncryptedKey = await encryptFileKeyForUser(decryptedFileKeyBase64, recipientData.public_key)
+
+          // ✅ Check nếu file đã share với user chưa → tránh duplicate
+          const { data: existingShare } = await supabase.from('file_shares')
+            .select('*')
+            .eq('file_id', file.file_id)
+            .eq('shared_with_user_id', recipientData.id)
+            .single()
+
+          if (!existingShare) {
+            await supabase.from('file_shares').insert({
+              file_id: file.file_id,
+              shared_with_user_id: recipientData.id,
+              encrypted_file_key: recipientEncryptedKey
+            })
+          }
+        } catch (err) {
+          console.error('[ERROR] Sharing file failed:', file.original_filename, err)
+        }
+      }
+
+      console.log('[INFO] Folder and subfolders/files shared successfully')
+    } catch (err) {
+      console.error('[ERROR] handleShareFolder:', err)
+      throw err
     }
   }
+
+
+
 
   const openShareModal = (id, type) => {
     setShareModal({ visible: true, targetId: id, type })
@@ -470,21 +493,10 @@ export default function Dashboard() {
         alert('User not found')
         return
       }
+
       console.debug('[DEBUG] Recipient found:', recipientData)
 
-      const { error: folderShareError } = await supabase
-        .from('folder_shares')
-        .insert({
-          folder_id: shareModal.targetId,
-          shared_with_user_id: recipientData.id
-        })
-
-      if (folderShareError) {
-        console.error('[ERROR] Save folder share failed:', folderShareError)
-        alert('Failed to share folder')
-        return
-      }
-
+      // ✅ Chỉ gọi handleShareFolder, không insert folder_share trước
       await handleShareFolder(shareModal.targetId, recipientData)
 
       alert('Folder shared successfully!')
@@ -494,6 +506,7 @@ export default function Dashboard() {
       alert('Share folder failed: ' + err.message)
     }
   }
+
 
   const handleDeleteFile = async (file) => {
     const isShare = !!file.shared_id; // có shared_id → là bản share
