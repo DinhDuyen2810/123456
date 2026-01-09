@@ -464,69 +464,90 @@ export default function Dashboard() {
   }
 
   const handleDeleteFile = async (file) => {
-    const isShare = !!file.shared_id; // có shared_id -> bản share
+    const isShare = !!file.shared_id; // nếu có shared_id → là bản share
 
     const confirmMsg = isShare
-      ? `Are you sure you want to delete this shared copy of ${file.original_filename}?`
-      : `Are you sure you want to delete ${file.original_filename}? This will also delete all shared copies.`;
+      ? `Are you sure you want to delete this shared copy of "${file.original_filename}"?`
+      : `Are you sure you want to delete "${file.original_filename}"? This will also delete all shared copies.`;
 
     if (!window.confirm(confirmMsg)) return;
 
     try {
       if (isShare) {
-        // Chỉ xóa bản share
-        const { error: shareError } = await supabase.from('file_shares')
+        // Xóa chỉ bản share
+        const { error: shareError } = await supabase
+          .from('file_shares')
           .delete()
           .eq('shared_id', file.shared_id);
         if (shareError) throw shareError;
       } else {
-        // Xóa tất cả share trước
-        const { error: shareError } = await supabase.from('file_shares')
+        // 1️⃣ Xóa tất cả share liên quan
+        const { error: shareError } = await supabase
+          .from('file_shares')
           .delete()
           .eq('file_id', file.file_id);
         if (shareError) throw shareError;
 
-        // Xóa file từ storage
+        // 2️⃣ Xóa file từ storage
         const { error: storageError } = await supabase.storage
           .from('encrypted-files')
           .remove([file.storage_path]);
         if (storageError) throw storageError;
 
-        // Xóa metadata file gốc
-        const { error: fileError } = await supabase.from('files')
+        // 3️⃣ Xóa metadata file gốc
+        const { error: fileError } = await supabase
+          .from('files')
           .delete()
           .eq('file_id', file.file_id);
         if (fileError) throw fileError;
       }
 
-      // Cập nhật state
+      // 4️⃣ Cập nhật state
       setFiles(prev => prev.filter(f => f.file_id !== file.file_id && f.shared_id !== file.shared_id));
       setSharedFiles(prev => prev.filter(f => f.file_id !== file.file_id && f.shared_id !== file.shared_id));
 
+      alert('File deleted successfully!');
     } catch (err) {
       console.error('[ERROR] handleDeleteFile:', err);
       alert('Delete failed: ' + err.message);
     }
   };
 
+  const deleteFileFromDB = async (file) => {
+    if (file.shared_id) {
+      // Xóa bản share
+      const { error } = await supabase.from('file_shares').delete().eq('shared_id', file.shared_id);
+      if (error) throw error;
+    } else {
+      // Xóa tất cả share trước
+      const { error: shareError } = await supabase.from('file_shares').delete().eq('file_id', file.file_id);
+      if (shareError) throw shareError;
+
+      // Xóa file storage
+      const { error: storageError } = await supabase.storage.from('encrypted-files').remove([file.storage_path]);
+      if (storageError) throw storageError;
+
+      // Xóa metadata file gốc
+      const { error: fileError } = await supabase.from('files').delete().eq('file_id', file.file_id);
+      if (fileError) throw fileError;
+    }
+  };
+
   const handleDeleteFolder = async (folder) => {
     const isShare = !!folder.shared_id;
-
     const confirmMsg = isShare
-      ? `Are you sure you want to delete this shared folder ${folder.name}?`
-      : `Are you sure you want to delete folder ${folder.name} and all its contents?`;
+      ? `Are you sure you want to delete this shared folder "${folder.name}"?`
+      : `Are you sure you want to delete folder "${folder.name}" and all its contents?`;
 
     if (!window.confirm(confirmMsg)) return;
 
     try {
       if (isShare) {
         // Chỉ xóa folder share
-        const { error: shareError } = await supabase.from('folder_shares')
-          .delete()
-          .eq('shared_id', folder.shared_id);
-        if (shareError) throw shareError;
+        const { error } = await supabase.from('folder_shares').delete().eq('shared_id', folder.shared_id);
+        if (error) throw error;
       } else {
-        // Lấy tất cả file trong folder + subfolder
+        // 1️⃣ Lấy tất cả file trong folder + subfolder
         const getAllFilesInFolder = async (fid) => {
           const { data: files } = await supabase.from('files').select('*').eq('folder_id', fid);
           const { data: subfolders } = await supabase.from('folders').select('*').eq('parent_id', fid);
@@ -539,18 +560,18 @@ export default function Dashboard() {
 
         const allFiles = await getAllFilesInFolder(folder.folder_id);
 
-        // Xóa tất cả file theo logic gốc/share
+        // Xóa tất cả file (không hỏi confirm từng file)
         for (let file of allFiles) {
-          await handleDeleteFile(file);
+          await deleteFileFromDB(file);
         }
 
-        // Xóa tất cả folder_shares liên quan
+        // 2️⃣ Xóa tất cả folder_shares liên quan
         const { error: folderShareError } = await supabase.from('folder_shares')
           .delete()
           .eq('folder_id', folder.folder_id);
         if (folderShareError) throw folderShareError;
 
-        // Xóa tất cả subfolders
+        // 3️⃣ Lấy tất cả subfolders đệ quy
         const getAllSubfolders = async (fid) => {
           const { data: subfolders } = await supabase.from('folders').select('*').eq('parent_id', fid);
           let allSubs = [...(subfolders || [])];
@@ -562,23 +583,22 @@ export default function Dashboard() {
 
         const allSubfolders = await getAllSubfolders(folder.folder_id);
 
+        // Xóa tất cả subfolders và folder_shares
         for (let f of allSubfolders) {
-          // Xóa folder_shares của subfolder trước
           await supabase.from('folder_shares').delete().eq('folder_id', f.folder_id);
-          // Xóa folder
           await supabase.from('folders').delete().eq('folder_id', f.folder_id);
         }
 
         // Xóa folder gốc
-        const { error: folderError } = await supabase.from('folders')
-          .delete()
-          .eq('folder_id', folder.folder_id);
+        const { error: folderError } = await supabase.from('folders').delete().eq('folder_id', folder.folder_id);
         if (folderError) throw folderError;
       }
 
       // Cập nhật state
       setFolders(prev => prev.filter(f => f.folder_id !== folder.folder_id));
       setSharedFolders(prev => prev.filter(f => f.folder_id !== folder.folder_id));
+      setFiles(prev => prev.filter(f => f.folder_id !== folder.folder_id));
+      setSharedFiles(prev => prev.filter(f => f.folder_id !== folder.folder_id));
 
       alert('Folder deleted successfully!');
     } catch (err) {
