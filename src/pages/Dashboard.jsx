@@ -142,14 +142,42 @@ export default function Dashboard() {
   }
 
   const handleUploadFolder = async (event) => {
-    const files = event.target.files
-    if (!files || files.length === 0) return
+    const fileList = event.target.files
+    if (!fileList || fileList.length === 0) return
 
-    for (let file of files) {
+    for (let file of fileList) {
       try {
+        const relativePath = file.webkitRelativePath || file.name // "A/B/C/file.txt"
+        const pathParts = relativePath.split('/') // ["A","B","C","file.txt"]
+        const fileName = pathParts.pop() // "file.txt"
+        let parentFolderId = currentFolderId // bắt đầu từ folder đang mở
+
+        // Tạo folder theo path
+        for (let folderName of pathParts) {
+          let { data: existingFolder } = await supabase
+            .from('folders')
+            .select('*')
+            .eq('name', folderName)
+            .eq('parent_id', parentFolderId)
+            .eq('owner_id', user.userId)
+            .single()
+
+          if (!existingFolder) {
+            const { data: newFolder } = await supabase
+              .from('folders')
+              .insert([{ name: folderName, parent_id: parentFolderId, owner_id: user.userId }])
+              .select()
+              .single()
+            parentFolderId = newFolder.folder_id
+          } else {
+            parentFolderId = existingFolder.folder_id
+          }
+        }
+
+        // Encrypt và upload file
         const { encryptedFile, fileKey, iv } = await encryptFile(await file.arrayBuffer())
         const fileId = crypto.randomUUID()
-        const safeName = file.name.replace(/[^a-zA-Z0-9.\-_]/g, '_')
+        const safeName = fileName.replace(/[^a-zA-Z0-9.\-_]/g, '_')
         const storagePath = `demo/${fileId}_${safeName}`
 
         await supabase.storage.from('encrypted-files').upload(storagePath, new Blob([encryptedFile]), { upsert: true })
@@ -160,10 +188,10 @@ export default function Dashboard() {
         const { data: newFile } = await supabase.from('files').insert([{
           file_id: fileId,
           owner_id: user.userId,
-          folder_id: currentFolderId,
+          folder_id: parentFolderId,
           storage_path: storagePath,
           encrypted_file_key_owner: encryptedFileKeyOwner,
-          original_filename: file.name,
+          original_filename: fileName,
           mime_type: file.type,
           iv
         }]).select().single()
@@ -176,6 +204,38 @@ export default function Dashboard() {
     }
   }
 
+
+  const handleShareFolder = async (folderId, recipientData) => {
+    // Đệ quy lấy tất cả file trong folder và subfolder
+    async function getAllFilesInFolder(fid) {
+      const { data: filesInFolder } = await supabase.from('files').select('*').eq('folder_id', fid)
+      const { data: subfolders } = await supabase.from('folders').select('*').eq('parent_id', fid)
+      let allFiles = [...filesInFolder]
+
+      for (let sf of subfolders) {
+        allFiles = allFiles.concat(await getAllFilesInFolder(sf.folder_id))
+      }
+      return allFiles
+    }
+
+    const filesToShare = await getAllFilesInFolder(folderId)
+
+    for (let file of filesToShare) {
+      const decryptedFileKeyBase64 = await decryptFileKeyForUser({
+        sealedBase64Url: file.encrypted_file_key_owner,
+        senderPublicKeyBase64: user.publicKey,
+        userPrivateKeyBase64: user.privateKey
+      })
+      const recipientEncryptedKey = await encryptFileKeyForUser(decryptedFileKeyBase64, recipientData.public_key)
+      await supabase.from('file_shares').insert({
+        file_id: file.file_id,
+        shared_with_user_id: recipientData.id,
+        encrypted_file_key: recipientEncryptedKey
+      })
+    }
+  }
+
+
   // Share modal handlers
   const openShareModal = (id, type) => {
     setShareModal({ visible: true, targetId: id, type })
@@ -186,7 +246,6 @@ export default function Dashboard() {
     setShareModal({ visible: false, targetId: null, type: null })
     setShareUsername('')
   }
-
 
   const handleShareSubmit = async () => {
     try {
