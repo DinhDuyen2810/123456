@@ -1,9 +1,8 @@
-// src/crypto/shareFileKey.js
 import sodium from 'libsodium-wrappers-sumo'
 
 export async function encryptFileKeyForUser(fileKeyBase64, recipientPublicKeyBase64) {
   await sodium.ready
-
+  console.log('[DEBUG] encryptFileKeyForUser params:', { fileKeyBase64, recipientPublicKeyBase64 })
   if (!fileKeyBase64 || !recipientPublicKeyBase64) throw new Error('Missing parameters')
 
   const fileKeyBytes = base64ToUint8Array(fileKeyBase64)
@@ -15,6 +14,7 @@ export async function encryptFileKeyForUser(fileKeyBase64, recipientPublicKeyBas
 
 export async function decryptFileKeyForUser(sealedBase64Url, senderPublicKeyBase64, userPrivateKeyBase64) {
   await sodium.ready
+  console.log('[DEBUG] decryptFileKeyForUser params:', { sealedBase64Url, senderPublicKeyBase64, userPrivateKeyBase64 })
 
   if (!sealedBase64Url || !senderPublicKeyBase64 || !userPrivateKeyBase64) throw new Error('Missing parameters')
 
@@ -25,24 +25,20 @@ export async function decryptFileKeyForUser(sealedBase64Url, senderPublicKeyBase
   const decrypted = sodium.crypto_box_seal_open(sealed, senderPublicKey, userPrivateKey)
   if (!decrypted) throw new Error('Decryption failed. Check keys.')
 
-  return arrayBufferToBase64(decrypted) // trả về base64 để decryptFile dùng
+  return arrayBufferToBase64(decrypted)
 }
 
 // Helpers
 function arrayBufferToBase64(buffer) {
   let binary = ''
   const bytes = new Uint8Array(buffer)
-  for (let i = 0; i < bytes.byteLength; i++) {
-    binary += String.fromCharCode(bytes[i])
-  }
+  for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i])
   return btoa(binary)
 }
 
 function base64ToUint8Array(base64) {
   const binary = atob(base64)
   const bytes = new Uint8Array(binary.length)
-  for (let i = 0; i < binary.length; i++) {
-    bytes[i] = binary.charCodeAt(i)
-  }
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
   return bytes
 }
