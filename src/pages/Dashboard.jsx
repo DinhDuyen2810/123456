@@ -39,13 +39,36 @@ export default function Dashboard() {
         setFolders(myFolders || [])
         setFiles(myFiles || [])
 
-        const { data: sharedFileLinks } = await supabase.from('file_shares').select('file_id').eq('shared_with_user_id', user.userId)
-        const { data: sharedFilesData } = await supabase.from('files').select('*').in('file_id', sharedFileLinks.map(f => f.file_id))
-        setSharedFiles(sharedFilesData || [])
+        const { data: sharedFileLinks } = await supabase
+          .from('file_shares')
+          .select('file_id')
+          .eq('shared_with_user_id', user.userId);
 
-        const { data: sharedFolderLinks } = await supabase.from('folder_shares').select('folder_id').eq('shared_with_user_id', user.userId)
-        const { data: sharedFoldersData } = await supabase.from('folders').select('*').in('folder_id', sharedFolderLinks.map(f => f.folder_id))
-        setSharedFolders(sharedFoldersData || [])
+        if (sharedFileLinks && sharedFileLinks.length > 0) {
+          const { data: sharedFilesData } = await supabase
+            .from('files')
+            .select('*')
+            .in('file_id', sharedFileLinks.map(f => f.file_id));
+          setSharedFiles(sharedFilesData || []);
+        } else {
+          setSharedFiles([]);
+        }
+
+        // Tương tự với folders
+        const { data: sharedFolderLinks } = await supabase
+          .from('folder_shares')
+          .select('folder_id')
+          .eq('shared_with_user_id', user.userId);
+
+        if (sharedFolderLinks && sharedFolderLinks.length > 0) {
+          const { data: sharedFoldersData } = await supabase
+            .from('folders')
+            .select('*')
+            .in('folder_id', sharedFolderLinks.map(f => f.folder_id));
+          setSharedFolders(sharedFoldersData || []);
+        } else {
+          setSharedFolders([]);
+        }
 
         console.log('[DEBUG] Data loaded:', { myFolders, myFiles, sharedFilesData, sharedFoldersData })
       } catch (err) {
@@ -85,15 +108,39 @@ export default function Dashboard() {
       const buffer = await data.arrayBuffer()
       const encryptedBytes = new Uint8Array(buffer)
 
-      const { data: ownerData } = await supabase.from('users').select('public_key').eq('id', file.owner_id).single()
-      const ownerPublicKey = ownerData.public_key
-      console.log('[DEBUG] Opening file:', file.original_filename, { ownerPublicKey, userPrivateKey: user.privateKey })
+      let decryptedFileKeyBase64
 
-      const decryptedFileKeyBase64 = await decryptFileKeyForUser({
-        sealedBase64Url: file.encrypted_file_key_owner,
-        senderPublicKeyBase64: ownerPublicKey,
-        userPrivateKeyBase64: user.privateKey
-      })
+      // ✅ Kiểm tra file của mình hay file shared
+      if (file.owner_id === user.userId) {
+        console.log('[DEBUG] Opening own file:', file.original_filename)
+        // ✅ THÊM userPublicKeyBase64
+        decryptedFileKeyBase64 = await decryptFileKeyForUser({
+          sealedBase64Url: file.encrypted_file_key_owner,
+          userPublicKeyBase64: user.publicKey,  // ✅ THÊM DÒNG NÀY
+          userPrivateKeyBase64: user.privateKey
+        })
+      } else {
+        console.log('[DEBUG] Opening shared file:', file.original_filename)
+        // File được share
+        const { data: shareData, error: shareError } = await supabase
+          .from('file_shares')
+          .select('encrypted_file_key')
+          .eq('file_id', file.file_id)
+          .eq('shared_with_user_id', user.userId)
+          .single()
+
+        if (shareError || !shareData) {
+          throw new Error('Cannot access shared file key')
+        }
+
+        // ✅ THÊM userPublicKeyBase64
+        decryptedFileKeyBase64 = await decryptFileKeyForUser({
+          sealedBase64Url: shareData.encrypted_file_key,
+          userPublicKeyBase64: user.publicKey,  // ✅ THÊM DÒNG NÀY
+          userPrivateKeyBase64: user.privateKey
+        })
+      }
+
       console.log('[DEBUG] FileKey decrypted:', decryptedFileKeyBase64)
 
       const decrypted = await decryptFile(encryptedBytes, decryptedFileKeyBase64, file.iv)
@@ -141,49 +188,63 @@ export default function Dashboard() {
     }
   }
 
-  const handleUploadFolder = async (folderPath, folderName) => {
+  const handleUploadFolder = async (event) => {
+    const files = Array.from(event.target.files);
+    if (files.length === 0) return;
+
     try {
-      let parentFolderId = null;
-
-      const pathParts = folderPath.split('/').filter(Boolean);
-
-      // 1️⃣ Tạo folder và subfolder nếu chưa tồn tại
-      for (let folderNamePart of pathParts) {
-        let query = supabase
-          .from('folders')
-          .select('*')
-          .eq('name', folderNamePart)
-          .eq('owner_id', user.userId);
-
-        if (parentFolderId === null) query = query.is('parent_id', null);
-        else query = query.eq('parent_id', parentFolderId);
-
-        const { data: existingFolder, error: fetchError } = await query.single();
-
-        if (fetchError && fetchError.code !== 'PGRST116') throw fetchError;
-
-        if (!existingFolder) {
-          const { data: newFolder, error: insertError } = await supabase
-            .from('folders')
-            .insert([{ name: folderNamePart, parent_id: parentFolderId, owner_id: user.userId }])
-            .select()
-            .single();
-
-          if (insertError) throw insertError;
-          parentFolderId = newFolder.folder_id;
-
-          // ✅ Cập nhật GUI ngay
-          setFolders(prev => [...prev, newFolder]);
-        } else {
-          parentFolderId = existingFolder.folder_id;
+      const folderStructure = {};
+      
+      // Phân tích cấu trúc folder từ webkitRelativePath
+      for (let file of files) {
+        const pathParts = file.webkitRelativePath.split('/');
+        pathParts.pop(); // Bỏ tên file
+        
+        let currentPath = '';
+        for (let part of pathParts) {
+          const parentPath = currentPath;
+          currentPath = currentPath ? `${currentPath}/${part}` : part;
+          
+          if (!folderStructure[currentPath]) {
+            folderStructure[currentPath] = { parentPath, name: part, folderId: null };
+          }
         }
       }
 
-      // 2️⃣ Upload tất cả file trong folder
-      const filesInFolder = await getAllFilesFromLocalFolder(folderPath); // bạn cần định nghĩa helper này
-      for (let file of filesInFolder) {
-        const uploadedFile = await uploadFileToSupabase(file, parentFolderId);
-        setFiles(prev => [...prev, uploadedFile]); // cập nhật GUI ngay
+      // Tạo folders theo thứ tự depth
+      const sortedPaths = Object.keys(folderStructure).sort((a, b) => 
+        a.split('/').length - b.split('/').length
+      );
+
+      for (let path of sortedPaths) {
+        const folder = folderStructure[path];
+        const parentFolderId = folder.parentPath 
+          ? folderStructure[folder.parentPath].folderId 
+          : currentFolderId;
+
+        const { data: newFolder, error } = await supabase
+          .from('folders')
+          .insert([{ 
+            name: folder.name, 
+            parent_id: parentFolderId, 
+            owner_id: user.userId 
+          }])
+          .select()
+          .single();
+
+        if (error) throw error;
+        folder.folderId = newFolder.folder_id;
+        setFolders(prev => [...prev, newFolder]);
+      }
+
+      // Upload files
+      for (let file of files) {
+        const pathParts = file.webkitRelativePath.split('/');
+        pathParts.pop();
+        const folderPath = pathParts.join('/');
+        const targetFolderId = folderPath ? folderStructure[folderPath].folderId : currentFolderId;
+
+        await handleUploadFile({ target: { files: [file] } }, targetFolderId);
       }
 
       alert('Folder uploaded successfully!');
@@ -191,7 +252,7 @@ export default function Dashboard() {
       console.error('[ERROR] handleUploadFolder:', err);
       alert('Upload folder failed: ' + err.message);
     }
-  }
+  };
 
 
 
@@ -199,59 +260,71 @@ export default function Dashboard() {
     async function getAllFilesInFolder(fid) {
       const { data: filesInFolder } = await supabase.from('files').select('*').eq('folder_id', fid)
       const { data: subfolders } = await supabase.from('folders').select('*').eq('parent_id', fid)
-      let allFiles = [...filesInFolder]
+      let allFiles = [...(filesInFolder || [])]
 
-      for (let sf of subfolders) {
+      for (let sf of subfolders || []) {
         allFiles = allFiles.concat(await getAllFilesInFolder(sf.folder_id))
       }
       return allFiles
     }
 
     const filesToShare = await getAllFilesInFolder(folderId)
+    console.log('[DEBUG] Files to share:', filesToShare.length)
 
     for (let file of filesToShare) {
-      let ownerPublicKey
-      const userPrivateKey = user.privateKey
+      try {
+        let ownerPublicKey
+        const userPrivateKey = user.privateKey
 
-      if (file.owner_id === user.userId) {
-        ownerPublicKey = user.publicKey
-      } else {
-        const { data: ownerData, error: ownerError } = await supabase
-          .from('users')
-          .select('public_key')
-          .eq('id', file.owner_id)
-          .single()
+        // ✅ Kiểm tra xem file có phải của user không
+        if (file.owner_id === user.userId) {
+          ownerPublicKey = user.publicKey
+        } else {
+          const { data: ownerData, error: ownerError } = await supabase
+            .from('users')
+            .select('public_key')
+            .eq('id', file.owner_id)
+            .single()
 
-        if (ownerError || !ownerData?.public_key) {
-          console.error('[ERROR] Owner public key missing for file:', file.original_filename, ownerError)
-          alert(`Cannot get owner public key for file ${file.original_filename}`)
+          if (ownerError || !ownerData?.public_key) {
+            console.error('[ERROR] Owner public key missing for file:', file.original_filename, ownerError)
+            continue
+          }
+
+          ownerPublicKey = ownerData.public_key
+        }
+
+        if (!ownerPublicKey || !userPrivateKey || !user.publicKey) {
+          console.error('[ERROR] Missing keys', { ownerPublicKey, userPrivateKey, userPublicKey: user.publicKey })
           continue
         }
 
-        ownerPublicKey = ownerData.public_key
+        // ✅ THÊM userPublicKeyBase64
+        console.log('[DEBUG] Decrypting file key for:', file.original_filename)
+        const decryptedFileKeyBase64 = await decryptFileKeyForUser({
+          sealedBase64Url: file.encrypted_file_key_owner,
+          userPublicKeyBase64: user.publicKey,  // ✅ THÊM DÒNG NÀY
+          userPrivateKeyBase64: userPrivateKey
+        })
+
+        console.log('[DEBUG] Encrypting for recipient:', recipientData.username)
+        const recipientEncryptedKey = await encryptFileKeyForUser(decryptedFileKeyBase64, recipientData.public_key)
+
+        const { error: shareError } = await supabase.from('file_shares').insert({
+          file_id: file.file_id,
+          shared_with_user_id: recipientData.id,
+          encrypted_file_key: recipientEncryptedKey
+        })
+
+        if (shareError) {
+          console.error('[ERROR] Failed to save share for file:', file.original_filename, shareError)
+          continue
+        }
+
+        console.log('[INFO] File shared successfully:', file.original_filename)
+      } catch (err) {
+        console.error('[ERROR] Failed to share file:', file.original_filename, err)
       }
-
-      if (!ownerPublicKey || !userPrivateKey) {
-        console.error('[ERROR] Missing keys', { ownerPublicKey, userPrivateKey })
-        alert('Missing keys, cannot decrypt file key')
-        continue
-      }
-
-      const decryptedFileKeyBase64 = await decryptFileKeyForUser({
-        sealedBase64Url: file.encrypted_file_key_owner,
-        senderPublicKeyBase64: ownerPublicKey,
-        userPrivateKeyBase64: userPrivateKey
-      })
-
-      const recipientEncryptedKey = await encryptFileKeyForUser(decryptedFileKeyBase64, recipientData.public_key)
-
-      await supabase.from('file_shares').insert({
-        file_id: file.file_id,
-        shared_with_user_id: recipientData.id,
-        encrypted_file_key: recipientEncryptedKey
-      })
-
-      console.log('[INFO] File shared successfully:', file.original_filename)
     }
   }
 
@@ -275,7 +348,6 @@ export default function Dashboard() {
         return
       }
 
-      // 1️⃣ Tìm người nhận theo username
       const { data: recipientData, error: recipientError } = await supabase
         .from('users')
         .select('id, username, public_key')
@@ -289,21 +361,18 @@ export default function Dashboard() {
       }
       console.debug('[DEBUG] Recipient found:', recipientData)
 
-      // 2️⃣ Xác định file(s) để share
       const targetIds = Array.isArray(shareModal.targetId) ? shareModal.targetId : [shareModal.targetId]
       const filesToShare = files.filter(f => targetIds.includes(f.file_id))
 
-      // 3️⃣ Lặp qua từng file để share
       for (let file of filesToShare) {
         let ownerPublicKey
-        let userPrivateKey = user.privateKey  // phải đảm bảo đã set khi load session
+        let userPrivateKey = user.privateKey
 
-        if (file.owner_id === user.id) {
-          // Nếu file của chính user
+        // ✅ SỬA: user.id → user.userId
+        if (file.owner_id === user.userId) {
           ownerPublicKey = user.publicKey  
-          userPrivateKey = user.privateKey   // privateKey đã giải mã
+          userPrivateKey = user.privateKey
         } else {
-          // Nếu file của người khác
           const { data: ownerData, error: ownerError } = await supabase
             .from('users')
             .select('public_key')
@@ -319,25 +388,25 @@ export default function Dashboard() {
           ownerPublicKey = ownerData.public_key
         }
 
-        if (!ownerPublicKey || !userPrivateKey) {
-          console.error('[ERROR] Missing keys', { ownerPublicKey, userPrivateKey })
+        if (!ownerPublicKey || !userPrivateKey || !user.publicKey) {
+          console.error('[ERROR] Missing keys', { ownerPublicKey, userPrivateKey, userPublicKey: user.publicKey })
           alert('Missing keys, cannot decrypt file key')
           continue
         }
 
         console.debug('[DEBUG] Decrypting file key for file:', file.original_filename)
+        // ✅ THÊM userPublicKeyBase64
         const decryptedFileKeyBase64 = await decryptFileKeyForUser({
           sealedBase64Url: file.encrypted_file_key_owner,
-          senderPublicKeyBase64: ownerPublicKey,
+          userPublicKeyBase64: user.publicKey,  // ✅ THÊM DÒNG NÀY
           userPrivateKeyBase64: userPrivateKey
         })
         console.debug('[DEBUG] Decrypted file key:', decryptedFileKeyBase64)
-        // 4️⃣ Encrypt file key cho recipient
+
         const recipientEncryptedKey = await encryptFileKeyForUser(decryptedFileKeyBase64, recipientData.public_key)
         console.debug('[DEBUG] Encrypted file key for recipient:', recipientEncryptedKey)
 
-        // 5️⃣ Lưu thông tin chia sẻ vào DB
-        const { data: shareResult, error: shareError } = await supabase
+        const { error: shareError } = await supabase
           .from('file_shares')
           .insert({
             file_id: file.file_id,
@@ -365,32 +434,43 @@ export default function Dashboard() {
   const handleShareFolderSubmit = async () => {
     try {
       if (!shareUsername) {
-        alert('Please enter a username to share with')
-        return
+        alert('Please enter a username to share with');
+        return;
       }
 
-      // 1️⃣ Tìm người nhận theo username
       const { data: recipientData, error: recipientError } = await supabase
         .from('users')
         .select('id, username, public_key')
         .eq('username', shareUsername)
-        .single()
+        .single();
 
       if (recipientError || !recipientData) {
-        console.error('[ERROR] User to share not found:', recipientError)
-        alert('User not found')
-        return
+        alert('User not found');
+        return;
       }
-      console.debug('[DEBUG] Recipient found:', recipientData)
 
-      // 2️⃣ Gọi handleShareFolder để share tất cả file trong folder và subfolder
-      await handleShareFolder(shareModal.targetId, recipientData)
+      // ✅ 1. Lưu folder share vào DB
+      const { error: folderShareError } = await supabase
+        .from('folder_shares')
+        .insert({
+          folder_id: shareModal.targetId,
+          shared_with_user_id: recipientData.id
+        });
 
-      alert('Folder shared successfully!')
-      closeShareModal()
+      if (folderShareError) {
+        console.error('[ERROR] Save folder share failed:', folderShareError);
+        alert('Failed to share folder');
+        return;
+      }
+
+      // ✅ 2. Share tất cả files trong folder
+      await handleShareFolder(shareModal.targetId, recipientData);
+
+      alert('Folder shared successfully!');
+      closeShareModal();
     } catch (err) {
-      console.error('[ERROR] handleShareFolderSubmit:', err)
-      alert('Share folder failed: ' + err.message)
+      console.error('[ERROR] handleShareFolderSubmit:', err);
+      alert('Share folder failed: ' + err.message);
     }
   }
 

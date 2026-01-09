@@ -59,26 +59,37 @@ export async function encryptFile(fileBuffer) {
 
 
 export async function decryptFile(encryptedBytes, fileKeyBase64, ivBase64) {
-  if (!ivBase64) throw new Error('nonce cannot be null or undefined')
+  if (!ivBase64) {
+    console.error('[DECRYPT ERROR] iv is missing');
+    throw new Error('IV (nonce) is required for decryption');
+  }
+  if (!fileKeyBase64) {
+    throw new Error('File key is required for decryption');
+  }
 
-  const iv = base64ToUint8Array(ivBase64)
-  const fileKey = base64ToUint8Array(fileKeyBase64)
+  try {
+    const iv = base64ToUint8Array(ivBase64);
+    const fileKey = base64ToUint8Array(fileKeyBase64);
 
-  const cryptoKey = await crypto.subtle.importKey(
-    'raw',
-    fileKey,
-    'AES-GCM',
-    false,
-    ['decrypt']
-  )
+    const cryptoKey = await crypto.subtle.importKey(
+      'raw',
+      fileKey,
+      'AES-GCM',
+      false,
+      ['decrypt']
+    );
 
-  const decryptedBuffer = await crypto.subtle.decrypt(
-    { name: 'AES-GCM', iv },
-    cryptoKey,
-    encryptedBytes
-  )
+    const decryptedBuffer = await crypto.subtle.decrypt(
+      { name: 'AES-GCM', iv },
+      cryptoKey,
+      encryptedBytes
+    );
 
-  return new Uint8Array(decryptedBuffer)
+    return new Uint8Array(decryptedBuffer);
+  } catch (err) {
+    console.error('[DECRYPT ERROR]', err);
+    throw new Error('Decryption failed: ' + err.message);
+  }
 }
 
 // Helpers

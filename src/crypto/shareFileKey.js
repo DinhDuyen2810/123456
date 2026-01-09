@@ -1,3 +1,4 @@
+// src/crypto/shareFileKey.js
 import sodium from 'libsodium-wrappers-sumo'
 
 export async function encryptFileKeyForUser(fileKeyBase64, recipientPublicKeyBase64) {
@@ -12,17 +13,21 @@ export async function encryptFileKeyForUser(fileKeyBase64, recipientPublicKeyBas
   return sodium.to_base64(sealed, sodium.base64_variants.URLSAFE_NO_PADDING)
 }
 
-export async function decryptFileKeyForUser({ sealedBase64Url, senderPublicKeyBase64, userPrivateKeyBase64 }) {
+// ✅ SỬA HÀM NÀY
+export async function decryptFileKeyForUser({ sealedBase64Url, userPublicKeyBase64, userPrivateKeyBase64 }) {
   await sodium.ready
-  console.log('[DEBUG] decryptFileKeyForUser params:', { sealedBase64Url, senderPublicKeyBase64, userPrivateKeyBase64 })
+  console.log('[DEBUG] decryptFileKeyForUser params:', { sealedBase64Url, userPublicKeyBase64, userPrivateKeyBase64 })
 
-  if (!sealedBase64Url || !senderPublicKeyBase64 || !userPrivateKeyBase64) throw new Error('Missing parameters')
+  if (!sealedBase64Url || !userPublicKeyBase64 || !userPrivateKeyBase64) {
+    throw new Error('Missing parameters for decryption')
+  }
 
   const sealed = sodium.from_base64(sealedBase64Url, sodium.base64_variants.URLSAFE_NO_PADDING)
-  const senderPublicKey = sodium.from_base64(senderPublicKeyBase64, sodium.base64_variants.URLSAFE_NO_PADDING)
+  const userPublicKey = sodium.from_base64(userPublicKeyBase64, sodium.base64_variants.URLSAFE_NO_PADDING)
   const userPrivateKey = sodium.from_base64(userPrivateKeyBase64, sodium.base64_variants.URLSAFE_NO_PADDING)
 
-  const decrypted = sodium.crypto_box_seal_open(sealed, senderPublicKey, userPrivateKey)
+  // ✅ ĐÚNG: crypto_box_seal_open chỉ cần 3 tham số
+  const decrypted = sodium.crypto_box_seal_open(sealed, userPublicKey, userPrivateKey)
   if (!decrypted) throw new Error('Decryption failed. Check keys.')
 
   return arrayBufferToBase64(decrypted)
