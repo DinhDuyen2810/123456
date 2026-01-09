@@ -141,72 +141,61 @@ export default function Dashboard() {
     }
   }
 
-  const handleUploadFolder = async (event) => {
-    const fileList = event.target.files
-    if (!fileList || fileList.length === 0) return
+  const handleUploadFolder = async (folderPath, folderName) => {
+    try {
+      let parentFolderId = null;
 
-    for (let file of fileList) {
-      try {
-        const relativePath = file.webkitRelativePath || file.name // "A/B/C/file.txt"
-        const pathParts = relativePath.split('/') // ["A","B","C","file.txt"]
-        const fileName = pathParts.pop() // "file.txt"
-        let parentFolderId = currentFolderId // bắt đầu từ folder đang mở
+      const pathParts = folderPath.split('/').filter(Boolean);
 
-        // Tạo folder theo path
-        for (let folderName of pathParts) {
-          let { data: existingFolder } = await supabase
+      // 1️⃣ Tạo folder và subfolder nếu chưa tồn tại
+      for (let folderNamePart of pathParts) {
+        let query = supabase
+          .from('folders')
+          .select('*')
+          .eq('name', folderNamePart)
+          .eq('owner_id', user.userId);
+
+        if (parentFolderId === null) query = query.is('parent_id', null);
+        else query = query.eq('parent_id', parentFolderId);
+
+        const { data: existingFolder, error: fetchError } = await query.single();
+
+        if (fetchError && fetchError.code !== 'PGRST116') throw fetchError;
+
+        if (!existingFolder) {
+          const { data: newFolder, error: insertError } = await supabase
             .from('folders')
-            .select('*')
-            .eq('name', folderName)
-            .eq('parent_id', parentFolderId)
-            .eq('owner_id', user.userId)
-            .single()
+            .insert([{ name: folderNamePart, parent_id: parentFolderId, owner_id: user.userId }])
+            .select()
+            .single();
 
-          if (!existingFolder) {
-            const { data: newFolder } = await supabase
-              .from('folders')
-              .insert([{ name: folderName, parent_id: parentFolderId, owner_id: user.userId }])
-              .select()
-              .single()
-            parentFolderId = newFolder.folder_id
-          } else {
-            parentFolderId = existingFolder.folder_id
-          }
+          if (insertError) throw insertError;
+          parentFolderId = newFolder.folder_id;
+
+          // ✅ Cập nhật GUI ngay
+          setFolders(prev => [...prev, newFolder]);
+        } else {
+          parentFolderId = existingFolder.folder_id;
         }
-
-        // Encrypt và upload file
-        const { encryptedFile, fileKey, iv } = await encryptFile(await file.arrayBuffer())
-        const fileId = crypto.randomUUID()
-        const safeName = fileName.replace(/[^a-zA-Z0-9.\-_]/g, '_')
-        const storagePath = `demo/${fileId}_${safeName}`
-
-        await supabase.storage.from('encrypted-files').upload(storagePath, new Blob([encryptedFile]), { upsert: true })
-
-        const { data: ownerData } = await supabase.from('users').select('public_key').eq('id', user.userId).single()
-        const encryptedFileKeyOwner = await encryptFileKeyForUser(fileKey, ownerData.public_key)
-
-        const { data: newFile } = await supabase.from('files').insert([{
-          file_id: fileId,
-          owner_id: user.userId,
-          folder_id: parentFolderId,
-          storage_path: storagePath,
-          encrypted_file_key_owner: encryptedFileKeyOwner,
-          original_filename: fileName,
-          mime_type: file.type,
-          iv
-        }]).select().single()
-
-        setFiles(prev => [...prev, newFile])
-      } catch (err) {
-        console.error('[ERROR] handleUploadFolder:', err)
-        alert('Upload folder failed: ' + err.message)
       }
+
+      // 2️⃣ Upload tất cả file trong folder
+      const filesInFolder = await getAllFilesFromLocalFolder(folderPath); // bạn cần định nghĩa helper này
+      for (let file of filesInFolder) {
+        const uploadedFile = await uploadFileToSupabase(file, parentFolderId);
+        setFiles(prev => [...prev, uploadedFile]); // cập nhật GUI ngay
+      }
+
+      alert('Folder uploaded successfully!');
+    } catch (err) {
+      console.error('[ERROR] handleUploadFolder:', err);
+      alert('Upload folder failed: ' + err.message);
     }
   }
 
 
+
   const handleShareFolder = async (folderId, recipientData) => {
-    // Đệ quy lấy tất cả file trong folder và subfolder
     async function getAllFilesInFolder(fid) {
       const { data: filesInFolder } = await supabase.from('files').select('*').eq('folder_id', fid)
       const { data: subfolders } = await supabase.from('folders').select('*').eq('parent_id', fid)
@@ -221,19 +210,51 @@ export default function Dashboard() {
     const filesToShare = await getAllFilesInFolder(folderId)
 
     for (let file of filesToShare) {
+      let ownerPublicKey
+      const userPrivateKey = user.privateKey
+
+      if (file.owner_id === user.userId) {
+        ownerPublicKey = user.publicKey
+      } else {
+        const { data: ownerData, error: ownerError } = await supabase
+          .from('users')
+          .select('public_key')
+          .eq('id', file.owner_id)
+          .single()
+
+        if (ownerError || !ownerData?.public_key) {
+          console.error('[ERROR] Owner public key missing for file:', file.original_filename, ownerError)
+          alert(`Cannot get owner public key for file ${file.original_filename}`)
+          continue
+        }
+
+        ownerPublicKey = ownerData.public_key
+      }
+
+      if (!ownerPublicKey || !userPrivateKey) {
+        console.error('[ERROR] Missing keys', { ownerPublicKey, userPrivateKey })
+        alert('Missing keys, cannot decrypt file key')
+        continue
+      }
+
       const decryptedFileKeyBase64 = await decryptFileKeyForUser({
         sealedBase64Url: file.encrypted_file_key_owner,
-        senderPublicKeyBase64: user.publicKey,
-        userPrivateKeyBase64: user.privateKey
+        senderPublicKeyBase64: ownerPublicKey,
+        userPrivateKeyBase64: userPrivateKey
       })
+
       const recipientEncryptedKey = await encryptFileKeyForUser(decryptedFileKeyBase64, recipientData.public_key)
+
       await supabase.from('file_shares').insert({
         file_id: file.file_id,
         shared_with_user_id: recipientData.id,
         encrypted_file_key: recipientEncryptedKey
       })
+
+      console.log('[INFO] File shared successfully:', file.original_filename)
     }
   }
+
 
 
   // Share modal handlers
@@ -340,6 +361,39 @@ export default function Dashboard() {
       alert('Share failed: ' + err.message)
     }
   }
+
+  const handleShareFolderSubmit = async () => {
+    try {
+      if (!shareUsername) {
+        alert('Please enter a username to share with')
+        return
+      }
+
+      // 1️⃣ Tìm người nhận theo username
+      const { data: recipientData, error: recipientError } = await supabase
+        .from('users')
+        .select('id, username, public_key')
+        .eq('username', shareUsername)
+        .single()
+
+      if (recipientError || !recipientData) {
+        console.error('[ERROR] User to share not found:', recipientError)
+        alert('User not found')
+        return
+      }
+      console.debug('[DEBUG] Recipient found:', recipientData)
+
+      // 2️⃣ Gọi handleShareFolder để share tất cả file trong folder và subfolder
+      await handleShareFolder(shareModal.targetId, recipientData)
+
+      alert('Folder shared successfully!')
+      closeShareModal()
+    } catch (err) {
+      console.error('[ERROR] handleShareFolderSubmit:', err)
+      alert('Share folder failed: ' + err.message)
+    }
+  }
+
 
 
 
@@ -468,7 +522,7 @@ export default function Dashboard() {
             />
             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
               <button onClick={closeShareModal}>Cancel</button>
-              <button onClick={handleShareSubmit}>Send</button>
+              <button onClick={shareModal.type === 'file' ? handleShareSubmit : handleShareFolderSubmit}>Send</button>
             </div>
           </div>
         </div>
