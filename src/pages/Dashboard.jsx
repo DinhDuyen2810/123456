@@ -463,6 +463,133 @@ export default function Dashboard() {
     }
   }
 
+  const handleDeleteFile = async (file) => {
+    const isShare = !!file.shared_id; // có shared_id -> bản share
+
+    const confirmMsg = isShare
+      ? `Are you sure you want to delete this shared copy of ${file.original_filename}?`
+      : `Are you sure you want to delete ${file.original_filename}? This will also delete all shared copies.`;
+
+    if (!window.confirm(confirmMsg)) return;
+
+    try {
+      if (isShare) {
+        // Chỉ xóa bản share
+        const { error: shareError } = await supabase.from('file_shares')
+          .delete()
+          .eq('shared_id', file.shared_id);
+        if (shareError) throw shareError;
+      } else {
+        // Xóa tất cả share trước
+        const { error: shareError } = await supabase.from('file_shares')
+          .delete()
+          .eq('file_id', file.file_id);
+        if (shareError) throw shareError;
+
+        // Xóa file từ storage
+        const { error: storageError } = await supabase.storage
+          .from('encrypted-files')
+          .remove([file.storage_path]);
+        if (storageError) throw storageError;
+
+        // Xóa metadata file gốc
+        const { error: fileError } = await supabase.from('files')
+          .delete()
+          .eq('file_id', file.file_id);
+        if (fileError) throw fileError;
+      }
+
+      // Cập nhật state
+      setFiles(prev => prev.filter(f => f.file_id !== file.file_id && f.shared_id !== file.shared_id));
+      setSharedFiles(prev => prev.filter(f => f.file_id !== file.file_id && f.shared_id !== file.shared_id));
+
+    } catch (err) {
+      console.error('[ERROR] handleDeleteFile:', err);
+      alert('Delete failed: ' + err.message);
+    }
+  };
+
+  const handleDeleteFolder = async (folder) => {
+    const isShare = !!folder.shared_id;
+
+    const confirmMsg = isShare
+      ? `Are you sure you want to delete this shared folder ${folder.name}?`
+      : `Are you sure you want to delete folder ${folder.name} and all its contents?`;
+
+    if (!window.confirm(confirmMsg)) return;
+
+    try {
+      if (isShare) {
+        // Chỉ xóa folder share
+        const { error: shareError } = await supabase.from('folder_shares')
+          .delete()
+          .eq('shared_id', folder.shared_id);
+        if (shareError) throw shareError;
+      } else {
+        // Lấy tất cả file trong folder + subfolder
+        const getAllFilesInFolder = async (fid) => {
+          const { data: files } = await supabase.from('files').select('*').eq('folder_id', fid);
+          const { data: subfolders } = await supabase.from('folders').select('*').eq('parent_id', fid);
+          let allFiles = [...(files || [])];
+          for (let sf of subfolders || []) {
+            allFiles = allFiles.concat(await getAllFilesInFolder(sf.folder_id));
+          }
+          return allFiles;
+        };
+
+        const allFiles = await getAllFilesInFolder(folder.folder_id);
+
+        // Xóa tất cả file theo logic gốc/share
+        for (let file of allFiles) {
+          await handleDeleteFile(file);
+        }
+
+        // Xóa tất cả folder_shares liên quan
+        const { error: folderShareError } = await supabase.from('folder_shares')
+          .delete()
+          .eq('folder_id', folder.folder_id);
+        if (folderShareError) throw folderShareError;
+
+        // Xóa tất cả subfolders
+        const getAllSubfolders = async (fid) => {
+          const { data: subfolders } = await supabase.from('folders').select('*').eq('parent_id', fid);
+          let allSubs = [...(subfolders || [])];
+          for (let sf of subfolders || []) {
+            allSubs = allSubs.concat(await getAllSubfolders(sf.folder_id));
+          }
+          return allSubs;
+        };
+
+        const allSubfolders = await getAllSubfolders(folder.folder_id);
+
+        for (let f of allSubfolders) {
+          // Xóa folder_shares của subfolder trước
+          await supabase.from('folder_shares').delete().eq('folder_id', f.folder_id);
+          // Xóa folder
+          await supabase.from('folders').delete().eq('folder_id', f.folder_id);
+        }
+
+        // Xóa folder gốc
+        const { error: folderError } = await supabase.from('folders')
+          .delete()
+          .eq('folder_id', folder.folder_id);
+        if (folderError) throw folderError;
+      }
+
+      // Cập nhật state
+      setFolders(prev => prev.filter(f => f.folder_id !== folder.folder_id));
+      setSharedFolders(prev => prev.filter(f => f.folder_id !== folder.folder_id));
+
+      alert('Folder deleted successfully!');
+    } catch (err) {
+      console.error('[ERROR] handleDeleteFolder:', err);
+      alert('Delete folder failed: ' + err.message);
+    }
+  };
+
+
+
+
   const displayedFolders = [...folders.filter(f => f.parent_id === currentFolderId), ...sharedFolders.filter(f => f.parent_id === currentFolderId)]
   const displayedFiles = [...files.filter(f => f.folder_id === currentFolderId), ...sharedFiles.filter(f => f.folder_id === currentFolderId)] 
 
@@ -470,7 +597,7 @@ export default function Dashboard() {
     <div style={{ display: 'flex', height: '100vh', width: '100vw', background: '#181818', color: '#e3e3e3' }}>
       {/* Sidebar */}
       <div style={{ width: 256, padding: 16, background: '#28292c', display: 'flex', flexDirection: 'column' }}>
-        <h2>Drive</h2>
+        <h2>Cloud_Tool</h2>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
           <button onClick={() => document.getElementById('upload-file-input').click()}>Upload File</button>
           <button onClick={() => document.getElementById('upload-folder-input').click()}>Upload Folder</button>
@@ -533,6 +660,7 @@ export default function Dashboard() {
               <div style={{ display: 'flex', gap: 8 }}>
                 <span style={{ cursor: 'pointer' }} title="Download" onClick={() => alert('Download folder TODO')}>⬇️</span>
                 <span style={{ cursor: 'pointer' }} title="Share" onClick={() => openShareModal(f.folder_id, 'folder')}>🔗</span>
+                <span style={{ cursor: 'pointer', color: 'red' }} title="Delete" onClick={() => handleDeleteFolder(f)}>🗑️</span>
               </div>
             </div>
           ))}
@@ -544,9 +672,9 @@ export default function Dashboard() {
               <span>{f.owner_id === user.userId ? user.username : 'Shared'}</span>
               <span>{f.created_at ? new Date(f.created_at).toLocaleString() : '-'}</span>
               <div style={{ display: 'flex', gap: 8 }}>
-                {/* ✅ SỬA: Nhấn download thực sự tải file */}
                 <span style={{ cursor: 'pointer' }} title="Download" onClick={() => handleDownload(f)}>⬇️</span>
                 <span style={{ cursor: 'pointer' }} title="Share" onClick={() => openShareModal(f.file_id, 'file')}>🔗</span>
+                <span style={{ cursor: 'pointer', color: 'red' }} title="Delete" onClick={() => handleDeleteFile(f)}>🗑️</span>
               </div>
             </div>
           ))}
