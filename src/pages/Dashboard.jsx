@@ -19,6 +19,8 @@ export default function Dashboard() {
 
   const [shareModal, setShareModal] = useState({ visible: false, targetId: null, type: null })
   const [shareUsername, setShareUsername] = useState('')
+  // ISO string or empty
+  const [shareExpiresAt, setShareExpiresAt] = useState('')
 
   // Load session
   useEffect(() => {
@@ -226,7 +228,7 @@ export default function Dashboard() {
       console.log('[DEBUG] Querying file_shares for', { file_id: file.file_id, shared_with_user_id: user.userId })
       const { data: shareData, error: shareError } = await supabase
         .from('file_shares')
-        .select('encrypted_file_key')
+        .select('encrypted_file_key, expires_at')
         .eq('file_id', file.file_id)
         .eq('shared_with_user_id', user.userId)
         .limit(1)
@@ -237,7 +239,10 @@ export default function Dashboard() {
         console.error('[ERROR] Cannot access shared file key', { shareError, shareData, file, user })
         throw new Error('Cannot access shared file key')
       }
-
+      // Kiểm tra hạn
+      if (shareData.expires_at && new Date(shareData.expires_at) < new Date()) {
+        throw new Error('Quyền truy cập file này đã hết hạn!')
+      }
       decryptedFileKeyBase64 = await decryptFileKeyForUser({
         sealedBase64Url: shareData.encrypted_file_key,
         userPublicKeyBase64: user.publicKey,
@@ -453,11 +458,13 @@ export default function Dashboard() {
   const openShareModal = (id, type) => {
     setShareModal({ visible: true, targetId: id, type })
     setShareUsername('')
+    setShareExpiresAt('') // reset khi mở modal mới
   }
 
   const closeShareModal = () => {
     setShareModal({ visible: false, targetId: null, type: null })
     setShareUsername('')
+    setShareExpiresAt('')
   }
 
   const handleShareSubmit = async () => {
@@ -887,7 +894,7 @@ export default function Dashboard() {
           alignItems: 'center', justifyContent: 'center',
           zIndex: 1000
         }}>
-          <div style={{ background: '#2c2c2c', padding: 20, borderRadius: 8, minWidth: 300 }}>
+          <div style={{ background: '#2c2c2c', padding: 20, borderRadius: 8, minWidth: 320 }}>
             <h3>Share {shareModal.type}</h3>
             <input
               type="text"
@@ -895,6 +902,21 @@ export default function Dashboard() {
               value={shareUsername}
               onChange={e => setShareUsername(e.target.value)}
               style={{ width: '100%', marginBottom: 10, padding: 4, color: '#000' }}
+            />
+            <label style={{ color: '#e3e3e3', marginBottom: 4, display: 'block' }} htmlFor="share-expires-at">
+              Expiration time (optional):
+              <span style={{ color: '#aaa', fontSize: 12, marginLeft: 4 }} title="Sau thời gian này, người nhận sẽ không truy cập được file.">
+                (Người nhận sẽ không truy cập được file sau thời điểm này)
+              </span>
+            </label>
+            <input
+              id="share-expires-at"
+              type="datetime-local"
+              value={shareExpiresAt}
+              min={new Date().toISOString().slice(0,16)}
+              onChange={e => setShareExpiresAt(e.target.value)}
+              style={{ width: '100%', marginBottom: 12, padding: 4, color: '#000' }}
+              placeholder="YYYY-MM-DD HH:mm"
             />
             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
               <button onClick={closeShareModal}>Cancel</button>

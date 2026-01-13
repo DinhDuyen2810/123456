@@ -58,5 +58,6 @@ Session và route được bảo vệ, chỉ user hợp lệ mới truy cập đ
 
 
  
-Cho phép thu hồi quyền truy cập file/folder đã chia sẻ.
+
 khóa file mỗi 1 tiếng thì sinh lại 1 lần
+nén bằng mật khẩu của chính mình
