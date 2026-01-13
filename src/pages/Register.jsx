@@ -3,7 +3,7 @@ import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import supabase from '../utils/supabase.js'
 import { deriveMasterKey } from '../crypto/keyDerivation.js'
-import { generateKeyPair } from '../crypto/keyPair.js'
+import { generateKeyPair, generateSignKeyPair } from '../crypto/keyPair.js'
 import { encryptWithKey } from '../crypto/fileEncryption.js'
 
 export default function Register() {
@@ -41,16 +41,21 @@ export default function Register() {
 
       // 3️⃣ Tạo keypair
       const { publicKey, privateKey } = await generateKeyPair()
-
-      // 4️⃣ Encrypt privateKey với masterKey
+      // 4️⃣ Tạo cặp khóa ký số
+      const { signPublicKey, signPrivateKey } = await generateSignKeyPair()
+      // 5️⃣ Encrypt privateKey với masterKey
       const encryptedPrivateKey = await encryptWithKey(privateKey, masterKey)
+      // 6️⃣ Encrypt signPrivateKey với masterKey
+      const encryptedSignPrivateKey = await encryptWithKey(signPrivateKey, masterKey)
 
-      // 5️⃣ Lưu vào DB
+      // 7️⃣ Lưu vào DB
       const { error: insertError } = await supabase.from('users').insert([
         {
           username,
           public_key: publicKey,
           encrypted_private_key: JSON.stringify(encryptedPrivateKey),
+          sign_public_key: signPublicKey,
+          encrypted_sign_private_key: JSON.stringify(encryptedSignPrivateKey),
           salt
         }
       ])

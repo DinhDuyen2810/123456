@@ -1,0 +1,97 @@
+-- WARNING: This schema is for context only and is not meant to be run.
+-- Table order and constraints may not be valid for execution.
+
+CREATE TABLE public.file_shares (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  file_id uuid,
+  shared_with_user_id uuid,
+  encrypted_file_key text NOT NULL,
+  created_at timestamp without time zone DEFAULT now(),
+  expires_at timestamp without time zone,
+  CONSTRAINT file_shares_pkey PRIMARY KEY (id),
+  CONSTRAINT file_shares_file_id_fkey FOREIGN KEY (file_id) REFERENCES public.files(file_id),
+  CONSTRAINT file_shares_shared_with_user_id_fkey FOREIGN KEY (shared_with_user_id) REFERENCES public.users(id)
+);
+CREATE TABLE public.files (
+  file_id uuid NOT NULL DEFAULT gen_random_uuid(),
+  owner_id uuid,
+  folder_id uuid,
+  storage_path text NOT NULL,
+  encrypted_file_key_owner text NOT NULL,
+  original_filename text,
+  mime_type text,
+  created_at timestamp without time zone DEFAULT now(),
+  iv text NOT NULL DEFAULT ''::text,
+  signature text,
+  sign_public_key text,
+  CONSTRAINT files_pkey PRIMARY KEY (file_id),
+  CONSTRAINT files_owner_id_fkey FOREIGN KEY (owner_id) REFERENCES public.users(id),
+  CONSTRAINT files_folder_id_fkey FOREIGN KEY (folder_id) REFERENCES public.folders(folder_id)
+);
+CREATE TABLE public.folder_shares (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  folder_id uuid,
+  shared_with_user_id uuid,
+  created_at timestamp without time zone DEFAULT now(),
+  parent_share_id bigint,
+  CONSTRAINT folder_shares_pkey PRIMARY KEY (id),
+  CONSTRAINT folder_shares_folder_id_fkey FOREIGN KEY (folder_id) REFERENCES public.folders(folder_id),
+  CONSTRAINT folder_shares_shared_with_user_id_fkey FOREIGN KEY (shared_with_user_id) REFERENCES public.users(id)
+);
+CREATE TABLE public.folders (
+  folder_id uuid NOT NULL DEFAULT gen_random_uuid(),
+  owner_id uuid,
+  parent_id uuid,
+  name text NOT NULL,
+  created_at timestamp without time zone DEFAULT now(),
+  CONSTRAINT folders_pkey PRIMARY KEY (folder_id),
+  CONSTRAINT folders_owner_id_fkey FOREIGN KEY (owner_id) REFERENCES public.users(id),
+  CONSTRAINT folders_parent_id_fkey FOREIGN KEY (parent_id) REFERENCES public.folders(folder_id)
+);
+CREATE TABLE public.users (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  username text NOT NULL UNIQUE,
+  public_key text NOT NULL,
+  encrypted_private_key text NOT NULL,
+  salt text NOT NULL,
+  created_at timestamp without time zone DEFAULT now(),
+  sign_public_key text,
+  encrypted_sign_private_key text,
+  CONSTRAINT users_pkey PRIMARY KEY (id)
+);
+Extension 
+pgcrypto
+1.3	extensions	
+cryptographic functions
+
+-	
+Docs
+
+pg_stat_statements
+1.11	extensions	
+track planning and execution statistics of all SQL statements executed
+
+Query Performance
+Docs
+
+pg_graphql
+1.5.11	graphql	
+pg_graphql: GraphQL support
+
+GraphiQL
+supabase/pg_graphql
+Docs
+
+uuid-ossp
+1.1	extensions	
+generate universally unique identifiers (UUIDs)
+
+-	
+Docs
+
+plpgsql
+1.0	pg_catalog	
+PL/pgSQL procedural language
+
+-	
+Docs

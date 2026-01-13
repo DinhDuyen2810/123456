@@ -5,6 +5,7 @@ import supabase from '../utils/supabase.js'
 import { deriveMasterKey } from '../crypto/keyDerivation.js'
 import { decryptWithKey } from '../crypto/fileEncryption.js'
 import { saveSession } from '../utils/session.js'
+import { generateSignKeyPair } from '../crypto/keyPair.js'
 
 export default function Login() {
   const [username, setUsername] = useState('')
@@ -44,12 +45,20 @@ export default function Login() {
       const encryptedObj = JSON.parse(user.encrypted_private_key)
       const privateKey = await decryptWithKey(encryptedObj, masterKey)
 
-      // 4️⃣ Save session
+      // 4️⃣ Decrypt signPrivateKey
+      let signPrivateKey = null
+      if (user.encrypted_sign_private_key) {
+        const encryptedSignObj = JSON.parse(user.encrypted_sign_private_key)
+        signPrivateKey = await decryptWithKey(encryptedSignObj, masterKey)
+      }
+      // 5️⃣ Save session
       saveSession({
         userId: user.id,
         username: user.username,
         privateKey,
-        publicKey: user.public_key
+        publicKey: user.public_key,
+        signPublicKey: user.sign_public_key,
+        signPrivateKey
       })
 
       navigate('/dashboard')

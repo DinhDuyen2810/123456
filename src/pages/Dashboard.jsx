@@ -169,8 +169,21 @@ export default function Dashboard() {
   //  Download file (tải về thực sự)
   const handleDownload = async (file) => {
     try {
+      // Tải encryptedFile từ Supabase Storage
+      const { data: encryptedFileData, error: downloadError } = await supabase.storage.from('encrypted-files').download(file.storage_path)
+      if (downloadError) {
+        alert('Download failed!')
+        return
+      }
+      const encryptedFileBytes = new Uint8Array(await encryptedFileData.arrayBuffer())
+      // Xác thực chữ ký
+      const isValid = await (await import('../crypto/keyPair.js')).verifyFileSignature(encryptedFileBytes, file.signature, file.sign_public_key)
+      if (!isValid) {
+        alert('File bị chỉnh sửa hoặc không hợp lệ!')
+        return
+      }
+      // Giải mã file như cũ
       const decryptedBlob = await decryptFileHelper(file)
-      
       // Tạo link download
       const url = URL.createObjectURL(decryptedBlob)
       const a = document.createElement('a')
@@ -180,7 +193,6 @@ export default function Dashboard() {
       a.click()
       document.body.removeChild(a)
       URL.revokeObjectURL(url)
-      
       console.log('[INFO] File downloaded:', file.original_filename)
     } catch (err) {
       console.error('[ERROR] handleDownload:', err)
@@ -190,6 +202,7 @@ export default function Dashboard() {
 
   //  Decrypt file (dùng chung cho preview và download)
   const decryptFileHelper = async (file) => {
+    console.log('[DEBUG] Downloading from storage:', file.storage_path, file)
     const { data, error } = await supabase.storage.from('encrypted-files').download(file.storage_path)
     if (error) {
       console.error('[ERROR] Download encrypted file from storage failed:', error, file)
@@ -252,6 +265,10 @@ export default function Dashboard() {
       const encryptedFileKeyOwner = await encryptFileKeyForUser(fileKey, ownerData.public_key)
       console.log('[DEBUG] Uploaded fileKey encrypted for owner:', encryptedFileKeyOwner)
 
+      // Ký số file
+      const { signPrivateKey, signPublicKey } = user
+      const signature = signPrivateKey ? (await import('../crypto/keyPair.js')).signFile(new Uint8Array(encryptedFile), signPrivateKey) : null
+
       const { data: newFile } = await supabase.from('files').insert([{
         file_id: fileId,
         owner_id: user.userId,
@@ -260,7 +277,9 @@ export default function Dashboard() {
         encrypted_file_key_owner: encryptedFileKeyOwner,
         original_filename: file.name,
         mime_type: file.type,
-        iv
+        iv,
+        signature: signature ? await signature : null,
+        sign_public_key: signPublicKey || null
       }]).select().single()
 
       setFiles(prev => [...prev, newFile])

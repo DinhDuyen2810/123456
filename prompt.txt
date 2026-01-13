@@ -54,3 +54,9 @@ Khi upload file, sinh fileKey ngẫu nhiên, mã hóa file bằng AES-GCM.
 Khi chia sẻ, mã hóa fileKey bằng publicKey của người nhận.
 Khi tải/giải mã, user dùng privateKey để giải mã fileKey, sau đó giải mã file.
 Session và route được bảo vệ, chỉ user hợp lệ mới truy cập được dữ liệu.
+
+
+
+ 
+Cho phép thu hồi quyền truy cập file/folder đã chia sẻ.
+khóa file mỗi 1 tiếng thì sinh lại 1 lần
