@@ -1,4 +1,6 @@
 // src/pages/Dashboard.jsx
+import JSZip from 'jszip'
+
 import { useEffect, useState } from 'react'
 import supabase from '../utils/supabase.js'
 import { getSession } from '../utils/session.js'
@@ -28,6 +30,51 @@ export default function Dashboard() {
     console.log('[DEBUG] Session loaded:', session)
     setUser(session)
   }, [])
+
+  const handleDownloadFolder = async (folder) => {
+    try {
+      const zip = new JSZip()
+
+      // Đệ quy lấy tất cả file trong folder và subfolder
+      const getAllFilesInFolder = async (fid, pathPrefix = '') => {
+        const { data: filesInFolder } = await supabase.from('files').select('*').eq('folder_id', fid)
+        const { data: subfolders } = await supabase.from('folders').select('*').eq('parent_id', fid)
+        console.log('[DEBUG] getAllFilesInFolder', { fid, pathPrefix, filesInFolder, subfolders })
+        // Thêm file vào zip
+        for (let file of filesInFolder || []) {
+          try {
+            console.log('[DEBUG] Decrypting file in folder:', file)
+            const decryptedBlob = await decryptFileHelper(file)
+            const filePath = pathPrefix ? `${pathPrefix}/${file.original_filename}` : file.original_filename
+            zip.file(filePath, decryptedBlob)
+          } catch (fileErr) {
+            console.error('[ERROR] decryptFileHelper failed:', file, fileErr)
+            throw fileErr
+          }
+        }
+        // Đệ quy cho subfolder
+        for (let sf of subfolders || []) {
+          await getAllFilesInFolder(sf.folder_id, pathPrefix ? `${pathPrefix}/${sf.name}` : sf.name)
+        }
+      }
+
+      await getAllFilesInFolder(folder.folder_id, folder.name)
+
+      // Tạo file zip và tải về
+      const content = await zip.generateAsync({ type: 'blob' })
+      const a = document.createElement('a')
+      a.href = URL.createObjectURL(content)
+      a.download = `${folder.name}.zip`
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      URL.revokeObjectURL(a.href)
+      alert('Folder downloaded as zip!')
+    } catch (err) {
+      console.error('[ERROR] handleDownloadFolder:', err)
+      alert('Download folder failed: ' + err.message)
+    }
+  }
 
   // Load folders/files
   useEffect(() => {
@@ -107,7 +154,7 @@ export default function Dashboard() {
     else await handlePreview(item)
   }
 
-  // ✅ HÀM MỚI: Preview file (mở xem trước)
+  //  Preview file (mở xem trước)
   const handlePreview = async (file) => {
     try {
       const decryptedBlob = await decryptFileHelper(file)
@@ -119,7 +166,7 @@ export default function Dashboard() {
     }
   }
 
-  // ✅ HÀM MỚI: Download file (tải về thực sự)
+  //  Download file (tải về thực sự)
   const handleDownload = async (file) => {
     try {
       const decryptedBlob = await decryptFileHelper(file)
@@ -141,10 +188,13 @@ export default function Dashboard() {
     }
   }
 
-  // ✅ HELPER: Decrypt file (dùng chung cho preview và download)
+  //  Decrypt file (dùng chung cho preview và download)
   const decryptFileHelper = async (file) => {
     const { data, error } = await supabase.storage.from('encrypted-files').download(file.storage_path)
-    if (error) throw error
+    if (error) {
+      console.error('[ERROR] Download encrypted file from storage failed:', error, file)
+      throw error
+    }
 
     const buffer = await data.arrayBuffer()
     const encryptedBytes = new Uint8Array(buffer)
@@ -152,22 +202,26 @@ export default function Dashboard() {
     let decryptedFileKeyBase64
 
     if (file.owner_id === user.userId) {
-      console.log('[DEBUG] Decrypting own file:', file.original_filename)
+      console.log('[DEBUG] Decrypting own file:', file.original_filename, file)
       decryptedFileKeyBase64 = await decryptFileKeyForUser({
         sealedBase64Url: file.encrypted_file_key_owner,
         userPublicKeyBase64: user.publicKey,
         userPrivateKeyBase64: user.privateKey
       })
     } else {
-      console.log('[DEBUG] Decrypting shared file:', file.original_filename)
+      console.log('[DEBUG] Decrypting shared file:', file.original_filename, file)
+      console.log('[DEBUG] Querying file_shares for', { file_id: file.file_id, shared_with_user_id: user.userId })
       const { data: shareData, error: shareError } = await supabase
         .from('file_shares')
         .select('encrypted_file_key')
         .eq('file_id', file.file_id)
         .eq('shared_with_user_id', user.userId)
-        .single()
+        .limit(1)
+        .maybeSingle()
 
+      console.log('[DEBUG] file_shares query result:', { shareData, shareError })
       if (shareError || !shareData) {
+        console.error('[ERROR] Cannot access shared file key', { shareError, shareData, file, user })
         throw new Error('Cannot access shared file key')
       }
 
@@ -178,7 +232,7 @@ export default function Dashboard() {
       })
     }
 
-    console.log('[DEBUG] FileKey decrypted')
+    console.log('[DEBUG] FileKey decrypted for', file.original_filename)
     const decrypted = await decryptFile(encryptedBytes, decryptedFileKeyBase64, file.iv)
     return new Blob([decrypted], { type: file.mime_type })
   }
@@ -722,7 +776,7 @@ export default function Dashboard() {
               <span>{f.owner_id === user.userId ? user.username : 'Shared'}</span>
               <span>{f.created_at ? new Date(f.created_at).toLocaleString() : '-'}</span>
               <div style={{ display: 'flex', gap: 8 }}>
-                <span style={{ cursor: 'pointer' }} title="Download" onClick={() => alert('Download folder TODO')}>⬇️</span>
+                <span style={{ cursor: 'pointer' }} title="Download" onClick={() => handleDownloadFolder(f)}>⬇️</span>
                 <span style={{ cursor: 'pointer' }} title="Share" onClick={() => openShareModal(f.folder_id, 'folder')}>🔗</span>
                 <span style={{ cursor: 'pointer', color: 'red' }} title="Delete" onClick={() => handleDeleteFolder(f)}>🗑️</span>
               </div>

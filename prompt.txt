@@ -1,0 +1,56 @@
+1. Sinh và quản lý khóa
+Khóa bất đối xứng (asymmetric keypair) cho mỗi user
+
+Được sinh ra bằng libsodium (crypto_box_keypair), lưu dưới dạng base64.
+Gồm: publicKey (khóa công khai) và privateKey (khóa bí mật).
+Dùng để mã hóa/giải mã khóa file khi chia sẻ (crypto_box_seal, crypto_box_seal_open).
+Khóa đối xứng (symmetric file key) cho mỗi file
+
+Mỗi file upload sẽ sinh ra một khóa ngẫu nhiên 32 bytes (AES-GCM).
+Khóa này chỉ dùng để mã hóa nội dung file, không dùng lại giữa các file.
+Khóa master (master key) dẫn xuất từ mật khẩu người dùng
+
+Dẫn xuất từ mật khẩu và salt bằng libsodium (PBKDF2 hoặc Argon2 tuỳ cấu hình).
+Dùng để mã hóa các thông tin nhạy cảm khác (nếu có).
+2. Mã hóa file
+Mã hóa nội dung file
+
+Sử dụng AES-GCM (WebCrypto API) với file key 32 bytes và IV 12 bytes.
+Kết quả trả về: encryptedFile (dữ liệu mã hóa), fileKey (base64), iv (base64).
+Giải mã file
+
+Cần fileKey (base64) và iv (base64) đúng.
+Nếu thiếu iv hoặc fileKey sẽ báo lỗi và không giải mã.
+3. Chia sẻ file an toàn
+Chia sẻ file key cho user khác
+
+Sử dụng khóa công khai của người nhận để mã hóa fileKey (crypto_box_seal).
+Người nhận dùng privateKey của mình để giải mã (crypto_box_seal_open).
+FileKey được mã hóa lưu trong trường encrypted_file_key_owner hoặc tương tự.
+Quy trình chia sẻ:
+
+Khi chia sẻ file, fileKey sẽ được mã hóa cho từng người nhận bằng publicKey của họ.
+Chỉ người nhận mới giải mã được fileKey, từ đó mới giải mã được nội dung file.
+4. Quản lý session, xác thực và phân quyền
+Session
+
+Lưu thông tin đăng nhập, publicKey/privateKey, userId vào sessionStorage.
+Kiểm tra session để bảo vệ các route riêng tư (PrivateRoute).
+Xác thực và phân quyền
+
+Sử dụng Supabase để xác thực, phân quyền truy cập file/folder.
+Các API chỉ trả về dữ liệu nếu user có quyền (kiểm tra owner_id, shared_with_user_id).
+5. Các thuật toán và thư viện sử dụng
+libsodium-wrappers-sumo: cho các thao tác mã hóa bất đối xứng, dẫn xuất khóa, mã hóa khóa chia sẻ.
+WebCrypto API: cho mã hóa đối xứng file (AES-GCM).
+Base64: chuẩn hóa dữ liệu khóa, nonce, iv khi lưu trữ và truyền tải.
+6. Bảo vệ dữ liệu khi lưu trữ và truyền tải
+File luôn được mã hóa trước khi upload lên Supabase Storage.
+Chỉ lưu khóa file đã được mã hóa bằng publicKey của từng user được chia sẻ.
+Không ai ngoài người nhận (có privateKey) giải mã được fileKey, kể cả admin hệ thống.
+7. Tóm tắt luồng bảo mật
+User đăng ký/sinh keypair, dẫn xuất master key từ mật khẩu.
+Khi upload file, sinh fileKey ngẫu nhiên, mã hóa file bằng AES-GCM.
+Khi chia sẻ, mã hóa fileKey bằng publicKey của người nhận.
+Khi tải/giải mã, user dùng privateKey để giải mã fileKey, sau đó giải mã file.
+Session và route được bảo vệ, chỉ user hợp lệ mới truy cập được dữ liệu.
