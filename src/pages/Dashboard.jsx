@@ -15,7 +15,6 @@ import supabase from '../utils/supabase.js'
 import { getSession } from '../utils/session.js'
 import { encryptFile, decryptFile } from '../crypto/fileEncryption.js'
 import { encryptFileKeyForUser, decryptFileKeyForUser } from '../crypto/shareFileKey.js'
-
 export default function Dashboard() {
   const [user, setUser] = useState(null)
   const [folders, setFolders] = useState([])
@@ -213,119 +212,121 @@ export default function Dashboard() {
 
   //  Decrypt file (dùng chung cho preview và download)
   const decryptFileHelper = async (file) => {
-    console.log('[DEBUG] Downloading from storage:', file.storage_path, file)
-    const { data, error } = await supabase.storage.from('encrypted-files').download(file.storage_path)
-    if (error) {
-      console.error('[ERROR] Download encrypted file from storage failed:', error, file)
-      throw error
-    }
+    console.log('[DEBUG] Downloading from storage:', file.storage_path)
 
-    const buffer = await data.arrayBuffer()
-    const encryptedBytes = new Uint8Array(buffer)
+    const { data, error } = await supabase
+      .storage
+      .from('encrypted-files')
+      .download(file.storage_path)
 
-    // Kiểm tra thời gian rotate fileKey
+    if (error) throw error
+
+    const encryptedBytes = new Uint8Array(await data.arrayBuffer())
+
     const now = Date.now()
-    const fileCreated = file.updated_at ? new Date(file.updated_at).getTime() : (file.created_at ? new Date(file.created_at).getTime() : now)
-    const needRotate = (now - fileCreated) > 3600 * 1000 // 1 tiếng
+    const fileCreated = new Date(file.updated_at || file.created_at).getTime()
+    const needRotate = (now - fileCreated) > 3600 * 1000
 
     let decryptedFileKeyBase64
 
-    if (needRotate && file.owner_id === user.userId) {
-      // Chủ file: sinh lại fileKey, mã hóa lại file, cập nhật DB và share
-      console.log('[ROTATE] Rotating fileKey for owner:', file.original_filename)
-      // 1. Giải mã fileKey cũ
+    // ============================
+    // OWNER
+    // ============================
+    if (file.owner_id === user.userId) {
       const oldFileKey = await decryptFileKeyForUser({
         sealedBase64Url: file.encrypted_file_key_owner,
         userPublicKeyBase64: user.publicKey,
         userPrivateKeyBase64: user.privateKey
       })
-      // 2. Giải mã file
-      const decrypted = await decryptFile(encryptedBytes, oldFileKey, file.iv)
-      // 3. Sinh fileKey mới
-      const fileKeyBytes = crypto.getRandomValues(new Uint8Array(32))
-      const newFileKey = btoa(String.fromCharCode(...fileKeyBytes))
-      // 4. Mã hóa lại file
-      const ivBytes = base64ToUint8Array(file.iv)
-      const cryptoKey = await crypto.subtle.importKey('raw', fileKeyBytes, 'AES-GCM', false, ['encrypt'])
-      const newEncryptedBuffer = await crypto.subtle.encrypt({ name: 'AES-GCM', iv: ivBytes }, cryptoKey, decrypted)
-      // 5. Upload lại file
-      await supabase.storage.from('encrypted-files').upload(file.storage_path, new Blob([new Uint8Array(newEncryptedBuffer)]), { upsert: true })
-      // 6. Mã hóa fileKey mới cho owner
-      const encryptedFileKeyOwner = await encryptFileKeyForUser(newFileKey, user.publicKey)
-      // 7. Cập nhật DB files
-      await supabase.from('files').update({ encrypted_file_key_owner: encryptedFileKeyOwner, updated_at: new Date().toISOString() }).eq('file_id', file.file_id)
-      // 8. Cập nhật cho tất cả người share
-      const { data: shares } = await supabase.from('file_shares').select('id, shared_with_user_id').eq('file_id', file.file_id)
-      for (let share of shares || []) {
-        // Lấy publicKey người nhận
-        const { data: userData } = await supabase.from('users').select('public_key').eq('id', share.shared_with_user_id).single()
-        if (userData && userData.public_key) {
-          const encryptedKey = await encryptFileKeyForUser(newFileKey, userData.public_key)
-          await supabase.from('file_shares').update({ encrypted_file_key: encryptedKey }).eq('id', share.id)
+
+      // Rotate nếu cần
+      if (needRotate) {
+        console.log('[ROTATE] Owner rotating key for', file.original_filename)
+
+        const decrypted = await decryptFile(encryptedBytes, oldFileKey, file.iv)
+
+        const newFileKeyBytes = crypto.getRandomValues(new Uint8Array(32))
+        const newFileKey = btoa(String.fromCharCode(...newFileKeyBytes))
+
+        const ivBytes = base64ToUint8Array(file.iv)
+        const cryptoKey = await crypto.subtle.importKey('raw', newFileKeyBytes, 'AES-GCM', false, ['encrypt'])
+        const newEncryptedBuffer = await crypto.subtle.encrypt(
+          { name: 'AES-GCM', iv: ivBytes },
+          cryptoKey,
+          decrypted
+        )
+
+        // upload lại
+        await supabase.storage.from('encrypted-files')
+          .upload(file.storage_path, new Blob([new Uint8Array(newEncryptedBuffer)]), { upsert: true })
+
+        // update owner key
+        const encryptedFileKeyOwner = await encryptFileKeyForUser(newFileKey, user.publicKey)
+        await supabase.from('files')
+          .update({ encrypted_file_key_owner: encryptedFileKeyOwner, updated_at: new Date().toISOString() })
+          .eq('file_id', file.file_id)
+
+        // update shares
+        const { data: shares } = await supabase
+          .from('file_shares')
+          .select('id, shared_with_user_id')
+          .eq('file_id', file.file_id)
+
+        for (let share of shares || []) {
+          const { data: u } = await supabase
+            .from('users')
+            .select('public_key')
+            .eq('id', share.shared_with_user_id)
+            .single()
+
+          if (u?.public_key) {
+            const enc = await encryptFileKeyForUser(newFileKey, u.public_key)
+            await supabase.from('file_shares')
+              .update({ encrypted_file_key: enc, updated_at: new Date().toISOString() })
+              .eq('id', share.id)
+          }
         }
+
+        decryptedFileKeyBase64 = newFileKey
+        const decryptedNew = await decryptFile(new Uint8Array(newEncryptedBuffer), newFileKey, file.iv)
+        return new Blob([decryptedNew], { type: file.mime_type })
       }
-      decryptedFileKeyBase64 = newFileKey
-      // Giải mã file với key mới
-      const decryptedNew = await decryptFile(new Uint8Array(newEncryptedBuffer), newFileKey, file.iv)
-      return new Blob([decryptedNew], { type: file.mime_type })
+
+      decryptedFileKeyBase64 = oldFileKey
     }
 
-    if (file.owner_id === user.userId) {
-      console.log('[DEBUG] Decrypting own file:', file.original_filename, file)
-      decryptedFileKeyBase64 = await decryptFileKeyForUser({
-        sealedBase64Url: file.encrypted_file_key_owner,
-        userPublicKeyBase64: user.publicKey,
-        userPrivateKeyBase64: user.privateKey
-      })
-    } else {
-      console.log('[DEBUG] Decrypting shared file:', file.original_filename, file)
-      console.log('[DEBUG] Querying file_shares for', { file_id: file.file_id, shared_with_user_id: user.userId })
-      // Sửa lại truy vấn đúng với schema file_shares
-      const { data: shareRows, error: shareError } = await supabase
+    // ============================
+    // SHARED USER
+    // ============================
+    else {
+      const { data: shareRows } = await supabase
         .from('file_shares')
-        .select('encrypted_file_key, expires_at, created_at')
+        .select('encrypted_file_key, expires_at')
         .eq('file_id', file.file_id)
         .eq('shared_with_user_id', user.userId)
         .limit(1)
-      const shareData = Array.isArray(shareRows) && shareRows.length > 0 ? shareRows[0] : null
 
-      console.log('[DEBUG] file_shares query result:', { shareData, shareError })
-      if (shareError || !shareData) {
-        console.error('[ERROR] Cannot access shared file key', { shareError, shareData, file, user })
-        throw new Error('Cannot access shared file key')
+      const share = shareRows?.[0]
+      if (!share) throw new Error('No access to this shared file')
+
+      if (share.expires_at && new Date(share.expires_at) < new Date()) {
+        throw new Error('Share expired')
       }
-      // Kiểm tra hạn
-      if (shareData.expires_at && new Date(shareData.expires_at) < new Date()) {
-        throw new Error('Quyền truy cập file này đã hết hạn!')
-      }
-      // Rotate key cho người share nếu cần
-      const shareUpdated = shareData.updated_at ? new Date(shareData.updated_at).getTime() : fileCreated
-      const needRotateShare = (now - shareUpdated) > 3600 * 1000
-      if (needRotateShare) {
-        // Lấy fileKey mới nhất từ owner
-        const { data: fileRow } = await supabase.from('files').select('encrypted_file_key_owner').eq('file_id', file.file_id).single()
-        const ownerKey = await decryptFileKeyForUser({
-          sealedBase64Url: fileRow.encrypted_file_key_owner,
-          userPublicKeyBase64: user.publicKey,
-          userPrivateKeyBase64: user.privateKey
-        })
-        // Mã hóa lại cho người share
-        const encryptedKey = await encryptFileKeyForUser(ownerKey, user.publicKey)
-        await supabase.from('file_shares').update({ encrypted_file_key: encryptedKey, updated_at: new Date().toISOString() }).eq('file_id', file.file_id).eq('shared_with_user_id', user.userId)
-        decryptedFileKeyBase64 = ownerKey
-      } else {
-        decryptedFileKeyBase64 = await decryptFileKeyForUser({
-          sealedBase64Url: shareData.encrypted_file_key,
-          userPublicKeyBase64: user.publicKey,
-          userPrivateKeyBase64: user.privateKey
-        })
-      }
+
+      decryptedFileKeyBase64 = await decryptFileKeyForUser({
+        sealedBase64Url: share.encrypted_file_key,
+        userPublicKeyBase64: user.publicKey,
+        userPrivateKeyBase64: user.privateKey
+      })
     }
 
-    console.log('[DEBUG] FileKey decrypted for', file.original_filename)
+    // ============================
+    // Decrypt file
+    // ============================
     const decrypted = await decryptFile(encryptedBytes, decryptedFileKeyBase64, file.iv)
     return new Blob([decrypted], { type: file.mime_type })
   }
+
 
   const handleUploadFile = async (event, folderId = currentFolderId) => {
     const file = event.target.files[0]
