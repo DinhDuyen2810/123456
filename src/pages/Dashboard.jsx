@@ -1,3 +1,12 @@
+// Helper: Chuyển base64 về Uint8Array
+function base64ToUint8Array(base64) {
+  const binary = atob(base64)
+  const bytes = new Uint8Array(binary.length)
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i)
+  }
+  return bytes
+}
 // src/pages/Dashboard.jsx
 import JSZip from 'jszip'
 
@@ -236,9 +245,9 @@ export default function Dashboard() {
       const fileKeyBytes = crypto.getRandomValues(new Uint8Array(32))
       const newFileKey = btoa(String.fromCharCode(...fileKeyBytes))
       // 4. Mã hóa lại file
-      const iv = file.iv
+      const ivBytes = base64ToUint8Array(file.iv)
       const cryptoKey = await crypto.subtle.importKey('raw', fileKeyBytes, 'AES-GCM', false, ['encrypt'])
-      const newEncryptedBuffer = await crypto.subtle.encrypt({ name: 'AES-GCM', iv: atob(iv) }, cryptoKey, decrypted)
+      const newEncryptedBuffer = await crypto.subtle.encrypt({ name: 'AES-GCM', iv: ivBytes }, cryptoKey, decrypted)
       // 5. Upload lại file
       await supabase.storage.from('encrypted-files').upload(file.storage_path, new Blob([new Uint8Array(newEncryptedBuffer)]), { upsert: true })
       // 6. Mã hóa fileKey mới cho owner
@@ -271,13 +280,14 @@ export default function Dashboard() {
     } else {
       console.log('[DEBUG] Decrypting shared file:', file.original_filename, file)
       console.log('[DEBUG] Querying file_shares for', { file_id: file.file_id, shared_with_user_id: user.userId })
-      const { data: shareData, error: shareError } = await supabase
+      // Sửa lại truy vấn đúng với schema file_shares
+      const { data: shareRows, error: shareError } = await supabase
         .from('file_shares')
-        .select('encrypted_file_key, expires_at, updated_at')
+        .select('encrypted_file_key, expires_at, created_at')
         .eq('file_id', file.file_id)
         .eq('shared_with_user_id', user.userId)
         .limit(1)
-        .maybeSingle()
+      const shareData = Array.isArray(shareRows) && shareRows.length > 0 ? shareRows[0] : null
 
       console.log('[DEBUG] file_shares query result:', { shareData, shareError })
       if (shareError || !shareData) {
@@ -321,21 +331,27 @@ export default function Dashboard() {
     const file = event.target.files[0]
     if (!file) return
     try {
+      // Mã hóa file
       const { encryptedFile, fileKey, iv } = await encryptFile(await file.arrayBuffer())
       const fileId = crypto.randomUUID()
       const safeName = file.name.replace(/[^a-zA-Z0-9.\-_]/g, '_')
       const storagePath = `demo/${fileId}_${safeName}`
 
+      // Upload file đã mã hóa
       await supabase.storage.from('encrypted-files').upload(storagePath, new Blob([encryptedFile]), { upsert: true })
 
+      // Mã hóa fileKey cho owner
       const { data: ownerData } = await supabase.from('users').select('public_key').eq('id', user.userId).single()
       const encryptedFileKeyOwner = await encryptFileKeyForUser(fileKey, ownerData.public_key)
-      console.log('[DEBUG] Uploaded fileKey encrypted for owner:', encryptedFileKeyOwner)
 
       // Ký số file
       const { signPrivateKey, signPublicKey } = user
-      const signature = signPrivateKey ? (await import('../crypto/keyPair.js')).signFile(new Uint8Array(encryptedFile), signPrivateKey) : null
+      let signature = null
+      if (signPrivateKey) {
+        signature = await (await import('../crypto/keyPair.js')).signFile(new Uint8Array(encryptedFile), signPrivateKey)
+      }
 
+      // Lưu metadata vào DB
       const { data: newFile } = await supabase.from('files').insert([{
         file_id: fileId,
         owner_id: user.userId,
@@ -345,7 +361,7 @@ export default function Dashboard() {
         original_filename: file.name,
         mime_type: file.type,
         iv,
-        signature: signature ? await signature : null,
+        signature,
         sign_public_key: signPublicKey || null
       }]).select().single()
 
@@ -580,15 +596,18 @@ export default function Dashboard() {
         const recipientEncryptedKey = await encryptFileKeyForUser(decryptedFileKeyBase64, recipientData.public_key)
         // 3. Lưu parent_share_id để truy vết chuỗi share
         const expiresAt = shareExpiresAt ? new Date(shareExpiresAt).toISOString() : null
+        const insertObj = {
+          file_id: file.file_id,
+          shared_with_user_id: recipientData.id,
+          encrypted_file_key: recipientEncryptedKey,
+          expires_at: expiresAt
+        }
+        // Chỉ thêm parent_share_id nếu schema có
+        // Nếu schema không có thì bỏ
+        // insertObj.parent_share_id = parentShareId // BỎ dòng này nếu schema không có
         const { error: shareError } = await supabase
           .from('file_shares')
-          .insert({
-            file_id: file.file_id,
-            shared_with_user_id: recipientData.id,
-            encrypted_file_key: recipientEncryptedKey,
-            expires_at: expiresAt,
-            parent_share_id: parentShareId
-          })
+          .insert(insertObj)
         if (shareError) {
           console.error('[ERROR] Failed to save share:', shareError)
           alert(`Failed to share file ${file.original_filename}`)

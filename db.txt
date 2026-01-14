@@ -8,6 +8,7 @@ CREATE TABLE public.file_shares (
   encrypted_file_key text NOT NULL,
   created_at timestamp without time zone DEFAULT now(),
   expires_at timestamp without time zone,
+  parent_share_id uuid,
   CONSTRAINT file_shares_pkey PRIMARY KEY (id),
   CONSTRAINT file_shares_file_id_fkey FOREIGN KEY (file_id) REFERENCES public.files(file_id),
   CONSTRAINT file_shares_shared_with_user_id_fkey FOREIGN KEY (shared_with_user_id) REFERENCES public.users(id)
@@ -59,6 +60,7 @@ CREATE TABLE public.users (
   encrypted_sign_private_key text,
   CONSTRAINT users_pkey PRIMARY KEY (id)
 );
+
 Extension 
 pgcrypto
 1.3	extensions	
