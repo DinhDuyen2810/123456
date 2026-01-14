@@ -580,7 +580,7 @@ export default function Dashboard() {
           })
         } else {
           // Lấy bản share gần nhất của user
-          const { data: myShare } = await supabase.from('file_shares').select('id, encrypted_file_key').eq('file_id', file.file_id).eq('shared_with_user_id', user.userId).maybeSingle()
+          const { data: myShare } = await supabase.from('file_shares').select('id, encrypted_file_key').eq('file_id', file.file_id).eq('shared_with_user_id', user.userId).single()
           if (!myShare) {
             alert('Bạn không có quyền chia sẻ file này')
             continue
@@ -593,6 +593,10 @@ export default function Dashboard() {
           })
         }
         // 2. Mã hóa lại fileKey cho người nhận mới
+        console.debug('[DEBUG] Encrypting fileKey for recipient:', {
+          recipientUsername: recipientData.username,
+          recipientPublicKey: recipientData.public_key
+        })
         const recipientEncryptedKey = await encryptFileKeyForUser(decryptedFileKeyBase64, recipientData.public_key)
         // 3. Lưu parent_share_id để truy vết chuỗi share
         const expiresAt = shareExpiresAt ? new Date(shareExpiresAt).toISOString() : null
