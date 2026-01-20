@@ -7,14 +7,85 @@ function base64ToUint8Array(base64) {
   }
   return bytes
 }
+
+// Component: Show countdown timer for expiration
+function ExpiresCountdown({ expiresAt }) {
+  const [timeLeft, setTimeLeft] = useState('')
+  const [isExpired, setIsExpired] = useState(false)
+
+  useEffect(() => {
+    if (!expiresAt) return
+
+    const updateTimer = () => {
+      const utcTime = expiresAt.includes('Z') || expiresAt.includes('+')
+        ? expiresAt
+        : expiresAt.replace(' ', 'T') + 'Z'
+      const expires = new Date(utcTime).getTime()
+      const now = Date.now()
+      const diff = expires - now
+
+      if (diff <= 0) {
+        setIsExpired(true)
+        setTimeLeft('Expired')
+        return
+      }
+
+      const seconds = Math.floor(diff / 1000)
+      const minutes = Math.floor(seconds / 60)
+      const hours = Math.floor(minutes / 60)
+      const days = Math.floor(hours / 24)
+
+      if (days > 0) {
+        setTimeLeft(`${days}d ${hours % 24}h left`)
+      } else if (hours > 0) {
+        setTimeLeft(`${hours}h ${minutes % 60}m left`)
+      } else if (minutes > 0) {
+        setTimeLeft(`${minutes}m ${seconds % 60}s left`)
+      } else {
+        setTimeLeft(`${seconds}s left`)
+      }
+    }
+
+    updateTimer()
+    const intervalId = setInterval(updateTimer, 1000)
+
+    return () => clearInterval(intervalId)
+  }, [expiresAt])
+
+  if (!expiresAt) return <span>-</span>
+
+  const utcTime = expiresAt.includes('Z') || expiresAt.includes('+')
+    ? expiresAt
+    : expiresAt.replace(' ', 'T') + 'Z'
+  const exactTime = new Date(utcTime).toLocaleString()
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', lineHeight: '1.2' }}>
+      <span
+        style={{
+          color: isExpired ? '#dc2626' : (timeLeft.includes('s left') && !timeLeft.includes('m') ? '#f59e0b' : '#6b7280'),
+          fontSize: '0.9em',
+          fontWeight: isExpired || timeLeft.includes('s left') ? 600 : 400,
+          cursor: 'help'
+        }}
+        title={`Expires at: ${exactTime}`}
+      >
+        {timeLeft}
+      </span>
+      <span style={{ fontSize: '0.75em', color: '#9ca3af' }}>{exactTime}</span>
+    </div>
+  )
+}
+
 // src/pages/Dashboard.jsx
 import JSZip from 'jszip'
 
 import { useEffect, useState } from 'react'
 import supabase from '../utils/supabase.js'
-import { getSession } from '../utils/session.js'
+import { getSession, clearSession } from '../utils/session.js'
 import { encryptFile, decryptFile } from '../crypto/fileEncryption.js'
 import { encryptFileKeyForUser, decryptFileKeyForUser } from '../crypto/shareFileKey.js'
+import { Shield, Folder, FileText, Download, Share2, Trash2, X, Plus, LogOut } from 'lucide-react'
 export default function Dashboard() {
   const [user, setUser] = useState(null)
   const [folders, setFolders] = useState([])
@@ -40,6 +111,11 @@ export default function Dashboard() {
     console.log('[DEBUG] Session loaded:', session)
     setUser(session)
   }, [])
+
+  const handleLogout = () => {
+    clearSession()
+    window.location.href = '/'
+  }
 
   const handleDownloadFolder = async (folder) => {
     try {
@@ -104,14 +180,27 @@ export default function Dashboard() {
             id,
             file_id,
             shared_with_user_id,
+            expires_at,
             files(*)
           `)
           .eq('shared_with_user_id', user.userId)
 
-        const mappedSharedFiles = sharedFilesData.map(s => ({
-          ...s.files,
-          shared_id: s.id
-        }))
+        // Delete expired shares
+        const now = new Date()
+        const expiredShares = sharedFilesData.filter(s => s.expires_at && new Date(s.expires_at) < now)
+        for (const share of expiredShares) {
+          await supabase.from('file_shares').delete().eq('id', share.id)
+          console.log('[AUTO-DELETE] Deleted expired share:', share.id, share.files?.original_filename)
+        }
+
+        const mappedSharedFiles = sharedFilesData
+          .filter(s => !s.expires_at || new Date(s.expires_at) > now)
+          .map(s => ({
+            ...s.files,
+            shared_id: s.id,
+            expires_at: s.expires_at
+          }))
+        console.log('[DEBUG] mappedSharedFiles:', mappedSharedFiles)
         setSharedFiles(mappedSharedFiles || [])
 
         // Shared folders
@@ -139,7 +228,33 @@ export default function Dashboard() {
       }
     }
     loadData()
-  }, [user])
+
+  }, [user]) // Removed sharedFiles from dependency to avoid infinite loop
+
+  // 🔄 Auto check expired shares separate effect
+  useEffect(() => {
+    const intervalId = setInterval(() => {
+      setSharedFiles(prev => {
+        const now = new Date()
+        const expiredFileShares = prev.filter(f => f.expires_at && new Date(f.expires_at) < now)
+
+        if (expiredFileShares.length > 0) {
+          console.log('[AUTO-CLEANUP] Found', expiredFileShares.length, 'expired file(s)')
+          // Delete from DB asynchronously
+          expiredFileShares.forEach(file => {
+            supabase.from('file_shares').delete().eq('id', file.shared_id)
+              .then(() => console.log('[AUTO-CLEANUP] Removed expired file:', file.original_filename))
+              .catch(err => console.error('[AUTO-CLEANUP ERROR]', err))
+          })
+
+          return prev.filter(f => !f.expires_at || new Date(f.expires_at) > now)
+        }
+        return prev
+      })
+    }, 60000)
+
+    return () => clearInterval(intervalId)
+  }, [])
 
 
   const toggleSelect = (id) => {
@@ -380,38 +495,38 @@ export default function Dashboard() {
 
     try {
       const folderStructure = {}
-      
+
       for (let file of files) {
         const pathParts = file.webkitRelativePath.split('/')
         pathParts.pop()
-        
+
         let currentPath = ''
         for (let part of pathParts) {
           const parentPath = currentPath
           currentPath = currentPath ? `${currentPath}/${part}` : part
-          
+
           if (!folderStructure[currentPath]) {
             folderStructure[currentPath] = { parentPath, name: part, folderId: null }
           }
         }
       }
 
-      const sortedPaths = Object.keys(folderStructure).sort((a, b) => 
+      const sortedPaths = Object.keys(folderStructure).sort((a, b) =>
         a.split('/').length - b.split('/').length
       )
 
       for (let path of sortedPaths) {
         const folder = folderStructure[path]
-        const parentFolderId = folder.parentPath 
-          ? folderStructure[folder.parentPath].folderId 
+        const parentFolderId = folder.parentPath
+          ? folderStructure[folder.parentPath].folderId
           : currentFolderId
 
         const { data: newFolder, error } = await supabase
           .from('folders')
-          .insert([{ 
-            name: folder.name, 
-            parent_id: parentFolderId, 
-            owner_id: user.userId 
+          .insert([{
+            name: folder.name,
+            parent_id: parentFolderId,
+            owner_id: user.userId
           }])
           .select()
           .single()
@@ -437,7 +552,7 @@ export default function Dashboard() {
     }
   }
 
-  const handleShareFolder = async (rootFolderId, recipientData) => {
+  const handleShareFolder = async (rootFolderId, recipientData, expiresAt) => {
     try {
       // 🌳 Lấy folder gốc + tất cả subfolder đệ quy
       const getAllSubfolders = async (fid) => {
@@ -510,14 +625,20 @@ export default function Dashboard() {
             .select('*')
             .eq('file_id', file.file_id)
             .eq('shared_with_user_id', recipientData.id)
-            .single()
+            .maybeSingle()
 
           if (!existingShare) {
             await supabase.from('file_shares').insert({
               file_id: file.file_id,
               shared_with_user_id: recipientData.id,
-              encrypted_file_key: recipientEncryptedKey
+              encrypted_file_key: recipientEncryptedKey,
+              expires_at: expiresAt
             })
+          } else {
+            await supabase.from('file_shares').update({
+              encrypted_file_key: recipientEncryptedKey,
+              expires_at: expiresAt
+            }).eq('id', existingShare.id)
           }
         } catch (err) {
           console.error('[ERROR] Sharing file failed:', file.original_filename, err)
@@ -567,7 +688,17 @@ export default function Dashboard() {
       console.debug('[DEBUG] Recipient found:', recipientData)
 
       const targetIds = Array.isArray(shareModal.targetId) ? shareModal.targetId : [shareModal.targetId]
-      const filesToShare = files.filter(f => targetIds.includes(f.file_id))
+      const allFiles = [...files, ...sharedFiles]
+      // Dùng Map để loại bỏ trùng lặp nếu file vừa là của mình vừa được share (lý thuyết ít khi xảy ra)
+      const uniqueFiles = Array.from(new Map(allFiles.map(item => [item.file_id, item])).values())
+
+      const filesToShare = uniqueFiles.filter(f => targetIds.includes(f.file_id))
+
+      console.log('[DEBUG] handleShareSubmit start', {
+        targetIds,
+        foundFilesCount: filesToShare.length,
+        shareExpiresAt
+      })
 
       for (let file of filesToShare) {
         // 1. Lấy fileKey đã giải mã (dù là chủ hay người được share)
@@ -599,20 +730,33 @@ export default function Dashboard() {
           recipientPublicKey: recipientData.public_key
         })
         const recipientEncryptedKey = await encryptFileKeyForUser(decryptedFileKeyBase64, recipientData.public_key)
-        // 3. Lưu parent_share_id để truy vết chuỗi share
+        // 3. Check duplicate share
+        const { data: existingShare } = await supabase.from('file_shares')
+          .select('id')
+          .eq('file_id', file.file_id)
+          .eq('shared_with_user_id', recipientData.id)
+          .maybeSingle()
+
+        console.log('[DEBUG] shareExpiresAt raw input:', shareExpiresAt)
         const expiresAt = shareExpiresAt ? new Date(shareExpiresAt).toISOString() : null
-        const insertObj = {
-          file_id: file.file_id,
-          shared_with_user_id: recipientData.id,
-          encrypted_file_key: recipientEncryptedKey,
-          expires_at: expiresAt
+        console.log('[DEBUG] Calculated expiresAt for DB:', expiresAt)
+
+        let shareError = null
+        if (existingShare) {
+          const { error } = await supabase.from('file_shares')
+            .update({ encrypted_file_key: recipientEncryptedKey, expires_at: expiresAt })
+            .eq('id', existingShare.id)
+          shareError = error
+        } else {
+          const { error } = await supabase.from('file_shares').insert({
+            file_id: file.file_id,
+            shared_with_user_id: recipientData.id,
+            encrypted_file_key: recipientEncryptedKey,
+            expires_at: expiresAt
+          })
+          shareError = error
         }
-        // Chỉ thêm parent_share_id nếu schema có
-        // Nếu schema không có thì bỏ
-        // insertObj.parent_share_id = parentShareId // BỎ dòng này nếu schema không có
-        const { error: shareError } = await supabase
-          .from('file_shares')
-          .insert(insertObj)
+
         if (shareError) {
           console.error('[ERROR] Failed to save share:', shareError)
           alert(`Failed to share file ${file.original_filename}`)
@@ -649,9 +793,10 @@ export default function Dashboard() {
       }
 
       console.debug('[DEBUG] Recipient found:', recipientData)
+      const expiresAt = shareExpiresAt ? new Date(shareExpiresAt).toISOString() : null
 
       // ✅ Chỉ gọi handleShareFolder, không insert folder_share trước
-      await handleShareFolder(shareModal.targetId, recipientData)
+      await handleShareFolder(shareModal.targetId, recipientData, expiresAt)
 
       alert('Folder shared successfully!')
       closeShareModal()
@@ -781,7 +926,10 @@ export default function Dashboard() {
 
         const allSubfolders = await getAllSubfolders(folder.folder_id);
 
-        for (let f of allSubfolders) {
+        // Reverse to delete children before parents
+        const sortedSubfolders = allSubfolders.reverse();
+
+        for (let f of sortedSubfolders) {
           await supabase.from('folder_shares').delete().eq('folder_id', f.folder_id);
           await supabase.from('folders').delete().eq('folder_id', f.folder_id);
         }
@@ -809,18 +957,27 @@ export default function Dashboard() {
 
 
   const displayedFolders = [...folders.filter(f => f.parent_id === currentFolderId), ...sharedFolders.filter(f => f.parent_id === currentFolderId)]
-  const displayedFiles = [...files.filter(f => f.folder_id === currentFolderId), ...sharedFiles.filter(f => f.folder_id === currentFolderId)] 
+  const displayedFiles = [...files.filter(f => f.folder_id === currentFolderId), ...sharedFiles.filter(f => f.folder_id === currentFolderId)]
 
   return (
-    <div style={{ display: 'flex', height: '100vh', width: '100vw', background: '#181818', color: '#e3e3e3' }}>
+    <div className="dashboard-layout">
       {/* Sidebar */}
-      <div style={{ width: 256, padding: 16, background: '#28292c', display: 'flex', flexDirection: 'column' }}>
-        <h2>Cloud_Tool</h2>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-          <button onClick={() => document.getElementById('upload-file-input').click()}>Upload File</button>
-          <button onClick={() => document.getElementById('upload-folder-input').click()}>Upload Folder</button>
+      <div className="sidebar">
+        <div className="logo-area">
+          <Shield className="file-icon" size={24} /> zkCloud
         </div>
-        <div style={{ marginTop: 'auto' }}>User: <b>{user?.username}</b></div>
+
+        <div className="sidebar-actions">
+          <button onClick={() => document.getElementById('upload-file-input').click()}>Upload File</button>
+          <button className="secondary" onClick={() => document.getElementById('upload-folder-input').click()}>Upload Folder</button>
+        </div>
+
+        <div className="user-info">
+          <div style={{ marginBottom: '0.5rem' }}>Logged in as: <b>{user?.username}</b></div>
+          <button onClick={handleLogout} className="danger" style={{ width: '100%', display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '0.5rem', padding: '0.4rem' }}>
+            <LogOut size={16} /> Logout
+          </button>
+        </div>
 
         <input
           type="file"
@@ -839,12 +996,12 @@ export default function Dashboard() {
         />
       </div>
 
-      {/* Main */}
-      <div style={{ flex: 1, padding: 16, display: 'flex', flexDirection: 'column' }}>
-        {/* Breadcrumb + action buttons */}
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-          <div>
-            <button onClick={() => setCurrentFolderId(null)}>Root</button>
+      {/* Main Content */}
+      <div className="main-content">
+        {/* Breadcrumb & Actions */}
+        <div className="toolbar">
+          <div className="breadcrumb">
+            <button onClick={() => setCurrentFolderId(null)}>Roots</button>
             {getBreadcrumb().map(f => (
               <span key={f.folder_id}> / <button onClick={() => setCurrentFolderId(f.folder_id)}>{f.name}</button></span>
             ))}
@@ -852,109 +1009,151 @@ export default function Dashboard() {
 
           {selection.size > 0 && (
             <div style={{ display: 'flex', gap: 8 }}>
-              <button onClick={() => alert('Download selected TODO')}>Download</button>
-              <button onClick={() => openShareModal(Array.from(selection)[0], 'file')}>Share</button>
+              <button className="secondary" onClick={() => alert('Download selected feature coming soon')}>Download Zip</button>
+              <button onClick={() => openShareModal(Array.from(selection)[0], 'file')}>Share Selected</button>
             </div>
           )}
         </div>
 
-        {/* Header */}
-        <div style={{ display: 'grid', gridTemplateColumns: '30px 1fr 150px 200px 150px', fontWeight: 'bold', borderBottom: '2px solid #555', padding: 8 }}>
-          <div></div>
-          <div>Name</div>
-          <div>Owner</div>
-          <div>Created At</div>
-          <div>Actions</div>
-        </div>
+        {/* File List */}
+        <div className="file-list-container">
+          <div className="file-grid-header">
+            <div></div>
+            <div>Name</div>
+            <div>Owner</div>
+            <div>Created At</div>
+            <div>Expires</div>
+            <div>Actions</div>
+          </div>
 
-        {/* Files/Folders */}
-        <div style={{ flex: 1, overflowY: 'auto' }}>
-          {displayedFolders.map(f => (
-            <div key={f.folder_id} style={{ display: 'grid', gridTemplateColumns: '30px 1fr 150px 200px 150px', padding: 8, alignItems: 'center', borderBottom: '1px solid #444', cursor: 'pointer' }} onDoubleClick={() => handleDoubleClick(f)}>
-              <input type="checkbox" checked={selection.has(f.folder_id)} readOnly onClick={() => toggleSelect(f.folder_id)} />
-              <span>📁 {f.name}</span>
-              <span>{f.owner_id === user.userId ? user.username : 'Shared'}</span>
-              <span>{f.created_at ? new Date(f.created_at).toLocaleString() : '-'}</span>
-              <div style={{ display: 'flex', gap: 8 }}>
-                <span style={{ cursor: 'pointer' }} title="Download" onClick={() => handleDownloadFolder(f)}>⬇️</span>
-                <span style={{ cursor: 'pointer' }} title="Share" onClick={() => openShareModal(f.folder_id, 'folder')}>🔗</span>
-                <span style={{ cursor: 'pointer', color: 'red' }} title="Delete" onClick={() => handleDeleteFolder(f)}>🗑️</span>
+          <div className="file-list-body">
+            {displayedFolders.map(f => (
+              <div
+                key={f.folder_id + (f.shared_id ? '-shared' : '')}
+                className="file-grid-row"
+                onDoubleClick={() => handleDoubleClick(f)}
+              >
+                <input
+                  type="checkbox"
+                  checked={selection.has(f.folder_id)}
+                  readOnly
+                  onClick={(e) => { e.stopPropagation(); toggleSelect(f.folder_id); }}
+                />
+                <div style={{ display: 'flex', alignItems: 'center' }}>
+                  <Folder className="file-icon" size={20} color="#4f46e5" fill="#4f46e5" fillOpacity={0.2} />
+                  <span>{f.name}</span>
+                </div>
+                <span>{f.owner_id === user.userId ? 'Me' : 'Shared'}</span>
+                <span>{f.created_at ? new Date(f.created_at).toLocaleDateString('vi-VN') : '-'}</span>
+                <span>-</span>
+                <div style={{ display: 'flex', gap: 4 }}>
+                  <button className="action-btn" title="Download" onClick={(e) => { e.stopPropagation(); handleDownloadFolder(f); }}>
+                    <Download size={18} />
+                  </button>
+                  <button className="action-btn" title="Share" onClick={(e) => { e.stopPropagation(); openShareModal(f.folder_id, 'folder'); }}>
+                    <Share2 size={18} />
+                  </button>
+                  <button className="action-btn delete" title="Delete" onClick={(e) => { e.stopPropagation(); handleDeleteFolder(f); }}>
+                    <Trash2 size={18} />
+                  </button>
+                </div>
               </div>
-            </div>
-          ))}
+            ))}
 
-          {displayedFiles.map(f => (
-            <div key={f.file_id} style={{ display: 'grid', gridTemplateColumns: '30px 1fr 150px 200px 150px', padding: 8, alignItems: 'center', borderBottom: '1px solid #444', cursor: 'pointer' }} onDoubleClick={() => handleDoubleClick(f)}>
-              <input type="checkbox" checked={selection.has(f.file_id)} readOnly onClick={() => toggleSelect(f.file_id)} />
-              <span>📄 {f.original_filename}</span>
-              <span>{f.owner_id === user.userId ? user.username : 'Shared'}</span>
-              <span>{f.created_at ? new Date(f.created_at).toLocaleString() : '-'}</span>
-              <div style={{ display: 'flex', gap: 8 }}>
-                <span style={{ cursor: 'pointer' }} title="Download" onClick={() => handleDownload(f)}>⬇️</span>
-                <span style={{ cursor: 'pointer' }} title="Share" onClick={() => openShareModal(f.file_id, 'file')}>🔗</span>
-                <span style={{ cursor: 'pointer', color: 'red' }} title="Delete" onClick={() => handleDeleteFile(f)}>🗑️</span>
+            {displayedFiles.map(f => {
+              console.log('[RENDER FILE]', f.original_filename, 'expires_at:', f.expires_at, 'shared_id:', f.shared_id)
+              return (
+                <div
+                  key={f.file_id + (f.shared_id ? '-shared' : '')}
+                  className="file-grid-row"
+                  onDoubleClick={() => handleDoubleClick(f)}
+                >
+                  <input
+                    type="checkbox"
+                    checked={selection.has(f.file_id)}
+                    readOnly
+                    onClick={(e) => { e.stopPropagation(); toggleSelect(f.file_id); }}
+                  />
+                  <div style={{ display: 'flex', alignItems: 'center', overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis' }}>
+                    <FileText className="file-icon" size={20} color="#6b7280" />
+                    <span title={f.original_filename}>{f.original_filename}</span>
+                  </div>
+                  <span>{f.owner_id === user.userId ? 'Me' : 'Shared'}</span>
+                  <span>{f.created_at ? new Date(f.created_at).toLocaleDateString('vi-VN') : '-'}</span>
+                  <ExpiresCountdown expiresAt={f.expires_at} />
+                  <div style={{ display: 'flex', gap: 4 }}>
+                    <button className="action-btn" title="Download" onClick={(e) => { e.stopPropagation(); handleDownload(f); }}>
+                      <Download size={18} />
+                    </button>
+                    <button className="action-btn" title="Share" onClick={(e) => { e.stopPropagation(); openShareModal(f.file_id, 'file'); }}>
+                      <Share2 size={18} />
+                    </button>
+                    <button className="action-btn delete" title="Delete" onClick={(e) => { e.stopPropagation(); handleDeleteFile(f); }}>
+                      <Trash2 size={18} />
+                    </button>
+                  </div>
+                </div>
+              )
+            })}
+
+            {displayedFolders.length === 0 && displayedFiles.length === 0 && (
+              <div style={{ padding: '2rem', textAlign: 'center', color: 'var(--text-muted)' }}>
+                This folder is empty.
               </div>
-            </div>
-          ))}
+            )}
+          </div>
         </div>
       </div>
 
-      {/* Preview Modal - ✅ SỬA: Chữ trắng cho text file */}
+      {/* Preview Modal */}
       {previewFile && (
-        <div style={{ 
-          position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, 
-          background: 'rgba(0,0,0,0.8)', display: 'flex', 
-          alignItems: 'center', justifyContent: 'center',
-          zIndex: 1000
-        }}>
-          <div style={{ background: '#2c2c2c', padding: 20, borderRadius: 8, maxWidth: '90%', maxHeight: '90%', overflow: 'auto' }}>
-            <h3 style={{ color: '#e3e3e3', marginBottom: 16 }}>{previewFile.name}</h3>
-            
-            {previewFile.type.startsWith('image') && (
-              <img src={previewFile.url} style={{ maxWidth: '80vw', maxHeight: '70vh', objectFit: 'contain' }} alt={previewFile.name} />
-            )}
-            
-            {previewFile.type.startsWith('text') && (
-              <iframe 
-                src={previewFile.url} 
-                style={{ 
-                  width: '80vw', 
-                  height: '60vh', 
-                  background: '#ffffffff',
-                  border: '1px solid #444',
-                  color: '#e3e3e3' 
-                }} 
-              />
-            )}
-            
-            {previewFile.type.startsWith('audio') && (
-              <audio controls style={{ width: '80vw' }}>
-                <source src={previewFile.url} type={previewFile.type} />
-              </audio>
-            )}
-            
-            {previewFile.type.startsWith('video') && (
-              <video controls style={{ maxWidth: '80vw', maxHeight: '60vh' }}>
-                <source src={previewFile.url} type={previewFile.type} />
-              </video>
-            )}
-            
-            {previewFile.type === 'application/pdf' && (
-              <iframe 
-                src={previewFile.url} 
-                style={{ width: '80vw', height: '70vh', border: '1px solid #444' }} 
-              />
-            )}
-            
-            <div style={{ marginTop: 16, textAlign: 'right', display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+        <div className="modal-overlay">
+          <div className="modal-content large">
+            <div className="modal-header" style={{ display: 'flex', justifyContent: 'space-between' }}>
+              <span>{previewFile.name}</span>
+              <button className="action-btn" onClick={() => setPreviewFile(null)}><X size={20} /></button>
+            </div>
+
+            <div style={{ flex: 1, display: 'flex', justifyContent: 'center', alignItems: 'center', background: '#f3f4f6', borderRadius: 8, overflow: 'hidden', marginBottom: '1rem' }}>
+              {previewFile.type.startsWith('image') && (
+                <img src={previewFile.url} style={{ maxWidth: '100%', maxHeight: '60vh', objectFit: 'contain' }} alt={previewFile.name} />
+              )}
+
+              {previewFile.type.startsWith('text') && (
+                <iframe
+                  src={previewFile.url}
+                  style={{ width: '100%', height: '100%', border: 'none', background: 'white' }}
+                />
+              )}
+
+              {previewFile.type.startsWith('audio') && (
+                <audio controls style={{ width: '100%' }}>
+                  <source src={previewFile.url} type={previewFile.type} />
+                </audio>
+              )}
+
+              {previewFile.type.startsWith('video') && (
+                <video controls style={{ maxWidth: '100%', maxHeight: '60vh' }}>
+                  <source src={previewFile.url} type={previewFile.type} />
+                </video>
+              )}
+
+              {previewFile.type === 'application/pdf' && (
+                <iframe
+                  src={previewFile.url}
+                  style={{ width: '100%', height: '100%', border: 'none' }}
+                />
+              )}
+            </div>
+
+            <div className="modal-actions">
               <button onClick={() => {
-                // ✅ Tải file từ preview
                 const a = document.createElement('a')
                 a.href = previewFile.url
                 a.download = previewFile.name
                 a.click()
               }}>Download</button>
-              <button onClick={() => setPreviewFile(null)}>Close</button>
+              <button className="secondary" onClick={() => setPreviewFile(null)}>Close</button>
             </div>
           </div>
         </div>
@@ -962,39 +1161,41 @@ export default function Dashboard() {
 
       {/* Share Modal */}
       {shareModal.visible && (
-        <div style={{
-          position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
-          background: 'rgba(0,0,0,0.5)', display: 'flex',
-          alignItems: 'center', justifyContent: 'center',
-          zIndex: 1000
-        }}>
-          <div style={{ background: '#2c2c2c', padding: 20, borderRadius: 8, minWidth: 320 }}>
-            <h3>Share {shareModal.type}</h3>
-            <input
-              type="text"
-              placeholder="Enter username"
-              value={shareUsername}
-              onChange={e => setShareUsername(e.target.value)}
-              style={{ width: '100%', marginBottom: 10, padding: 4, color: '#000' }}
-            />
-            <label style={{ color: '#e3e3e3', marginBottom: 4, display: 'block' }} htmlFor="share-expires-at">
-              Expiration time (optional):
-              <span style={{ color: '#aaa', fontSize: 12, marginLeft: 4 }} title="Sau thời gian này, người nhận sẽ không truy cập được file.">
-                (Người nhận sẽ không truy cập được file sau thời điểm này)
-              </span>
-            </label>
-            <input
-              id="share-expires-at"
-              type="datetime-local"
-              value={shareExpiresAt}
-              min={new Date().toISOString().slice(0,16)}
-              onChange={e => setShareExpiresAt(e.target.value)}
-              style={{ width: '100%', marginBottom: 12, padding: 4, color: '#000' }}
-              placeholder="YYYY-MM-DD HH:mm"
-            />
-            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
-              <button onClick={closeShareModal}>Cancel</button>
-              <button onClick={shareModal.type === 'file' ? handleShareSubmit : handleShareFolderSubmit}>Send</button>
+        <div className="modal-overlay">
+          <div className="modal-content">
+            <h3 className="modal-header">Share {shareModal.type}</h3>
+
+            <div style={{ marginBottom: '1rem' }}>
+              <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: 500 }}>Recipient Username</label>
+              <input
+                type="text"
+                placeholder="Enter username"
+                value={shareUsername}
+                onChange={e => setShareUsername(e.target.value)}
+                style={{ width: '100%' }}
+              />
+            </div>
+
+            <div style={{ marginBottom: '1.5rem' }}>
+              <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: 500 }}>
+                Expiration (optional)
+              </label>
+              <input
+                id="share-expires-at"
+                type="datetime-local"
+                value={shareExpiresAt}
+                min={new Date(new Date().getTime() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 16)}
+                onChange={e => setShareExpiresAt(e.target.value)}
+                style={{ width: '100%' }}
+              />
+              <div style={{ fontSize: '0.85em', color: 'var(--text-muted)', marginTop: 4 }}>
+                User access will be revoked after this time.
+              </div>
+            </div>
+
+            <div className="modal-actions">
+              <button className="secondary" onClick={closeShareModal}>Cancel</button>
+              <button onClick={shareModal.type === 'file' ? handleShareSubmit : handleShareFolderSubmit}>Share</button>
             </div>
           </div>
         </div>
